@@ -1,0 +1,17 @@
+// Migration-only schema for the Marketplace-owned "marketplace" Postgres schema.
+//
+// Used ONLY by scripts/db-guard.mjs (npm run db:migrate), never by the app. It deliberately contains no models: the
+// models live in ../schema.prisma (the runtime client), and the migrations in ./migrations are reviewed SQL that may
+// only create or change objects inside the "marketplace" schema. Prisma keeps this history in
+// marketplace._prisma_migrations — separate from AkadVerse's public._prisma_migrations, which this project never
+// reads or writes.
+//
+// The URL must be the restricted MIGRATION role (marketplace_migrator), whose only rights are: own the "marketplace"
+// schema, USAGE on "public", and REFERENCES on public."User"(id). It cannot create, alter or drop anything in
+// "public", so even a wrong migration can't change AkadVerse's tables.
+
+datasource db {
+  provider = "postgresql"
+  // Must include ?schema=marketplace (checked by db-guard).
+  url      = env("MARKETPLACE_MIGRATION_DATABASE_URL")
+}

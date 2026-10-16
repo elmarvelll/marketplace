@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/*
+ * The Marketplace is a light design (white cards, grey page). It used to switch the page text to near-white
+ * (#ededed) when the computer was in dark mode — inherited from AkadVerse — which made every element without its
+ * own text colour (quantity numbers, some form fields) almost invisible on the white cards. It is now light-only:
+ * dark text everywhere, and `color-scheme: light` so native controls (date/time pickers, selects, scrollbars) render
+ * light too. The sign-in page's own dark theme toggle sets its colours explicitly and is unaffected.
+ */
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  /* Loading skeletons: a gentle pulse (opacity 1 -> 0.65) so the grey placeholders stay clearly visible throughout. */
+  --animate-skeleton: skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/*
+ * Placeholders in any field the components didn't style: readable grey (WCAG AA on white), not the browser's faint
+ * default. In the base layer, so a component's own placeholder-* class (e.g. the sign-in page's dark theme) still wins.
+ */
+@layer base {
+  input::placeholder,
+  textarea::placeholder {
+    color: #6b7280;
+    opacity: 1;
+  }
+}

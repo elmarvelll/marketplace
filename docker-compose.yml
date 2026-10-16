@@ -1,0 +1,30 @@
+# LOCAL DEVELOPMENT ONLY — Postgres for local REPLICAS of AkadVerse's database (built by scripts/setup-local-db.mjs).
+#
+# A separate container, volume, port and database from AkadVerse's local database (which listens on 5433): nothing
+# here shares storage or a connection with AkadVerse. Start: npm run db:up   Stop: npm run db:down
+# The password is a throwaway for a container bound to 127.0.0.1 — never use it for a hosted database.
+
+name: akadverse-marketplace-local
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: marketplace
+      POSTGRES_PASSWORD: marketplace_local_only
+      POSTGRES_DB: akadverse_marketplace
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - marketplace-local-pg:/var/lib/postgresql/data
+      # No-op init; the replicas are created by npm run db:local:setup / npm run test:db:setup.
+      - ./scripts/docker-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marketplace -d akadverse_marketplace"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  marketplace-local-pg:
