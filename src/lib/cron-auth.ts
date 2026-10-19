@@ -17,7 +17,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-export function requireCronSecret(request: NextRequest): NextResponse | null {
+// marketplaceOnly: a job that exists only in this app (no AkadVerse twin to
+// duplicate it), so it runs here whatever MARKETPLACE_SCHEDULED_JOBS says —
+// e.g. /api/cron/vendor-slot-briefing. Still CRON_SECRET-authenticated.
+export function requireCronSecret(request: NextRequest, { marketplaceOnly = false }: { marketplaceOnly?: boolean } = {}): NextResponse | null {
   const expected = process.env.CRON_SECRET;
   if (!expected) {
     // Refuse to run rather than silently allow every caller through if the
@@ -31,7 +34,7 @@ export function requireCronSecret(request: NextRequest): NextResponse | null {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
-  if (process.env.MARKETPLACE_SCHEDULED_JOBS !== "enabled") {
+  if (!marketplaceOnly && process.env.MARKETPLACE_SCHEDULED_JOBS !== "enabled") {
     return NextResponse.json({ error: "Scheduled jobs are disabled in this deployment (AkadVerse runs them). Set MARKETPLACE_SCHEDULED_JOBS=enabled to move them here." }, { status: 503 });
   }
 

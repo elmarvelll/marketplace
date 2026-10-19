@@ -20,7 +20,8 @@ export async function register() {
   if (!env.NEXTAUTH_URL) warnings.push("NEXTAUTH_URL is not set — links in emails and auth callbacks need this app's public origin.");
   if (!env.NEXT_PUBLIC_AKADVERSE_URL) warnings.push("NEXT_PUBLIC_AKADVERSE_URL is not set — the sign-in page can't link people to AkadVerse to create an account.");
   if (!env.CRON_SECRET) warnings.push("CRON_SECRET is not set — /api/cron/* will refuse to run.");
-  if (env.MARKETPLACE_SCHEDULED_JOBS !== "enabled") warnings.push("MARKETPLACE_SCHEDULED_JOBS is not \"enabled\" — /api/cron/* is off here (AkadVerse runs the shared scheduled jobs). See README \"Scheduled jobs\".");
+  if (env.MARKETPLACE_SCHEDULED_JOBS !== "enabled") warnings.push("MARKETPLACE_SCHEDULED_JOBS is not \"enabled\" — the shared /api/cron/* jobs are off here (AkadVerse runs them); /api/cron/vendor-slot-briefing runs regardless. See README \"Scheduled jobs\".");
+  if (!env.DELIVERY_CODE_SECRET) warnings.push("DELIVERY_CODE_SECRET is not set — student delivery codes are keyed from NEXTAUTH_SECRET, so rotating that secret makes every outstanding code unusable until an admin reissues it.");
   if (!env.RESEND_API_KEY) warnings.push("RESEND_API_KEY is not set — emails are only logged, not sent.");
   const mode = env.PAYSTACK_MODE?.toLowerCase() === "live" ? "live" : "test";
   if (!(mode === "live" ? env.PAYSTACK_SECRET_KEY : env.PAYSTACK_TEST_SECRET_KEY)) warnings.push(`Paystack ${mode} secret key is not set — checkout will not work.`);

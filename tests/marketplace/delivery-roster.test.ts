@@ -19,8 +19,7 @@ import { createOrdersForCheckout } from "@/services/marketplace/checkout/create-
 import { getCheckoutSummary } from "@/services/marketplace/checkout/get-checkout-summary";
 import { reconcileCheckoutPayment } from "@/services/marketplace/checkout/reconcile-checkout-payment";
 import { rejectOrder } from "@/services/marketplace/order/reject-order";
-import { markOrderReady } from "@/services/marketplace/order/mark-order-ready";
-import { markVendorOrderFailed } from "@/services/marketplace/vendor/order/mark-vendor-order-failed";
+import { refundVendorItem } from "@/services/marketplace/admin/vendor-delivery/refund-vendor-item";
 import { applyRosterChange, parseRosterChange, previewRosterChange, type RosterChange } from "@/services/marketplace/delivery-roster/roster-changes";
 import { decideOccurrence, resolveOccurrence } from "@/services/marketplace/delivery-roster/roster-resolution";
 import { countReservedDeliveries } from "@/services/marketplace/delivery-roster/roster-capacity";
@@ -203,9 +202,10 @@ describe("delivery limits (Vendor Market)", () => {
     const paid = await bookVendor(s);
     await payVendor(paid);
     assert.equal(await countReservedDeliveries("VENDOR", s.slot.id, date), 1);
-    const order = await prisma.order.findFirstOrThrow({ where: { paystackReference: paid.reference } });
-    signInAs(s.owner);
-    await markVendorOrderFailed(s.vendor.id, order.id, "Out of rice");
+    // Vendors no longer refund their own orders; an admin refunds every item.
+    const order = await prisma.order.findFirstOrThrow({ where: { paystackReference: paid.reference }, include: { items: true } });
+    const admin = await makeUser({ isAdmin: true });
+    for (const item of order.items) await refundVendorItem(order.id, item.id, "Out of rice", admin.id);
     assert.equal(await countReservedDeliveries("VENDOR", s.slot.id, date), 0, "a fully refunded order frees its place");
   });
 
@@ -317,8 +317,7 @@ describe("plans: which deliverer a booked delivery is planned for", () => {
     }
     const [dispatchedBooking, manualBooking, rosterBooking] = bookings;
     // One is really assigned to David (dispatched); one an admin planned for Mike by hand.
-    signInAs(s.owner);
-    await markOrderReady(s.vendor.id, dispatchedBooking.orders[0].id, s.owner.id);
+    // Paid vendor orders are assignable at once — vendors never mark them ready.
     const assigned = await assignPlannedDeliveries(dispatchedBooking.orders[0].items.map((i) => i.id), await admin());
     assert.deepEqual(assigned.assigned.map((a) => a.delivererId), [david.id]);
     await setPlannedDeliverer({ bookingId: manualBooking.id, delivererId: mike.id }, await admin());
@@ -386,8 +385,6 @@ describe("plans: which deliverer a booked delivery is planned for", () => {
     // An admin can plan it by hand (the row is created then), and assign it as planned.
     await setPlannedDeliverer({ bookingId: booking.id, delivererId: other.id }, await admin());
     assert.deepEqual(await planOfBooking(booking.id).then((p) => [p.plannedDelivererId, p.planSource, isoDate(p.date)]), [other.id, "MANUAL", s.date]);
-    signInAs(s.owner);
-    await markOrderReady(s.vendor.id, order.id, s.owner.id);
     const out = await assignPlannedDeliveries(order.items.map((i) => i.id), await admin());
     assert.deepEqual([out.assigned.map((a) => a.delivererId), out.skipped.length], [[other.id], 0]);
     await assert.rejects(setPlannedDeliverer({ bookingId: booking.id, delivererId: d.id }, await admin()), isConflict, "frozen once dispatched");

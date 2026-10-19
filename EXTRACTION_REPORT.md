@@ -128,6 +128,151 @@ Not done: starting the app against live and signing in. Starting a server on liv
 permissions; the owner does it. Sections 2, 5 and 9 below describe the restricted-role path, which is now optional;
 using AkadVerse's own login is a deliberate trade-off.
 
+## Update (2026-10-19): student-orchestrated Vendor Market delivery
+
+**Outcome.** Vendor Market delivery is now run centrally. Admins (acting as vendor managers) and the weekly roster
+run it, and deliverers confirm each delivery with a six-digit code the student gives them. Vendors only see their
+orders. Built and tested on the local replica. **Nothing was applied to production:** the new migration, and the
+earlier `20261017120000_delivery_rosters` (which production also still lacks — that is why the live checkout shows
+"Couldn't load your checkout"), need `npm run db:migrate` (section 9).
+
+### Old flow → new flow
+
+| Step | Before | Now |
+|---|---|---|
+| Ordering | Slot closed 90 min (per-slot setting) before start, and only on the same calendar day | Closes **2 hours before the slot starts**, strictly (7–8 PM slot: 4:59 PM open, 5:00 PM closed). It also works across midnight. Admins may set a longer cutoff, never a shorter one |
+| After payment | Order auto-accepted; vendor had to tap ✓ Ready (or ✗ to refund) | Same auto-accept. **Vendors have no actions.** Paid items are immediately assignable. The student is emailed a delivery code |
+| Assignment | Admin, after the vendor marked ready | **Automatic at T−2h** to the roster's planned deliverer. Anything unplanned is flagged for an admin. Admins can reassign uncollected items |
+| Briefing | None | At T−2h, every admin gets a slot summary, and each assigned deliverer gets a briefing. Each is sent once |
+| Shift start | None | The deliverer reports to the **meeting point**. An admin checks them in, which moves the shift from **Scheduled** to **In progress** and hands over the card. **Pickups and deliveries are refused until then.** If the slot ends with no check-in, the shift is **Missed** |
+| Pickup | Vendor shows pickup code; deliverer enters it | Unchanged (at the vendor's own location), but only once the shift is in progress |
+| Delivery | Per item: a new plaintext code emailed when "out for delivery", 30-min expiry | Per **booking**: one code per student delivery, issued at payment. The deliverer sees 3 of its 6 digits and enters all 6. Offline entry is queued on the phone and verified by the server. The code must reach the server within 24 hours of the slot ending |
+| Completion | Item DELIVERED → payout-eligible → 24 h dispute window | Unchanged (same function now shared by both flows) |
+
+### The rules, precisely
+
+- **Cutoff** (`is-slot-bookable.ts`). A new order may be placed only while minutes-to-start > max(120, the slot's
+  `bookingCutoffMins`). Times are computed in Africa/Lagos. The checkout summary (slots and dates) and the
+  Serializable booking transaction both call it. A checkout initialized before the cutoff can still be paid within
+  its existing 30-minute hold, because payment confirmation never re-checks the cutoff.
+- **Capacity unit.** This is unchanged: one booking per student checkout counts once against the roster limit,
+  whatever the number of vendors. Each vendor's own capacity counts its own order.
+- **Code** (`src/lib/delivery-code.ts`, table `marketplace.DeliveryHandoverCode`):
+  - Six digits from `crypto.randomInt`, one per `VendorDeliveryBooking`, shared by all its vendor orders.
+  - Stored as an HMAC bound to the booking id (so it can't complete another booking, and is compared in constant
+    time), plus an AES-256-GCM copy so the student can see it in My Orders. It is never stored in plaintext.
+  - Keys are derived from `DELIVERY_CODE_SECRET`, falling back to `NEXTAUTH_SECRET`.
+  - The mask (3 random positions hidden, fixed per code) is all deliverers and admins ever see: on the card, in
+    the API and in print. Emails and notifications to anyone else never contain it. The student's email is sent
+    directly, not through the outbox, so the code isn't stored in `EmailDelivery`.
+  - 5 wrong attempts lock the code until an admin reissues it. There is also a limit of 10 wrong codes per
+    deliverer per 15 minutes.
+- **Deadline.** Confirmation must reach the server within 24 h of the slot's end, or of a rescheduled retry. The
+  server's receive time decides; the phone's time is kept only for audit. A correct code that arrives late is
+  stored as `LATE_REVIEW` and completes nothing. An admin may accept it (only if the code was correct), with a
+  reason, or decline it.
+- **Offline.** `offline-code-queue.ts` keeps an entry in localStorage with a one-time `submissionId` until the server
+  settles it, then deletes it. It is retried on reconnect and every 30 s, and discarded after 48 h. The server is
+  idempotent per `submissionId`, and item completion is conditional, so replays repeat nothing. Offline entry is
+  not offline verification.
+- **Vendors.** Their ready and fail routes and services are deleted. The generic seller actions (accept, reject,
+  ready, drop-off, reject item) now refuse School Vendor businesses at the route (`requireOwnedBusinessOnly`).
+  Mark-ready and reject-item also refuse them in the service. Refunds go through the existing admin per-item
+  refund, now on the operations page.
+
+### Where things live
+
+- **Admin:** *Delivery Operations* tab (`/admin/delivery-operations`). Per day and slot it shows:
+  - when orders closed, and whether the briefing went out
+  - every booking, with its vendor orders, payment state, deliverer, masked code, deadline and "needs attention"
+    flags
+  - late confirmations to review
+  - each deliverer's printable card, with its shift state (Scheduled, In progress, Delivered or Missed)
+  - the **meeting point** setting.
+
+  The actions are:
+  - **Checked in — start shift**
+  - **Unlock missed shift** (after the slot ends; needs a reason, and still counts as missed)
+  - reassign, new code, refund item, and accept or decline a late confirmation.
+
+  All are audited in `AdminActionLog`, with a reason where the action changes a delivery. The weekly roster stays on *Delivery Roster*.
+- **Deliverer:** *Vendor delivery cards* on `/deliverer`: shift state and where and when to report, then pickups,
+  then deliveries with the mask, Start delivery, code entry, Couldn't deliver and Print. Actions only appear once
+  the shift is in progress. It also shows their record for the last 30 days (delivered and missed shifts). The old
+  per-item list now shows Business items only.
+- **Student:** My Orders shows the delivery date and slot and the full code until it's used.
+- **Scheduler:** `GET /api/cron/vendor-slot-briefing` with `Authorization: Bearer $CRON_SECRET`, every 5–10 min, from
+  an external scheduler (README "Scheduled jobs"). It runs regardless of `MARKETPLACE_SCHEDULED_JOBS`, because
+  AkadVerse has no copy of it. Exactly-once is enforced by `marketplace.SlotBriefingNotice` (claimed before
+  sending, released only if the send fails).
+
+### Files
+
+| Area | Files |
+|---|---|
+| Cutoff | `services/marketplace/vendor-delivery/is-slot-bookable.ts`, `admin/vendor-delivery/manage-vendor-slots.ts`, `src/app/admin/vendor-delivery/page.tsx` (label) |
+| Vendors info-only | deleted `vendor/order/mark-vendor-order-{ready,failed}.ts` and their routes; `delivery/shared/ready-item-filter.ts`; `order/mark-order-ready.ts`, `order/reject-order-item.ts`; five `businesses/[id]/orders/**/route.controller.ts`; `vendor/order/list-vendor-orders.ts`; `src/app/vendor-dashboard/[id]/orders/page.tsx` |
+| Code and confirmation | `src/lib/delivery-code.ts`; `services/marketplace/vendor-delivery/handover/*` (code, deadline, submit, booking actions, manifest, admin operations); `delivery/shared/complete-delivered-item.ts` (extracted from `confirm-delivery.ts`); `confirm-delivery.ts` and `mark-out-for-delivery.ts` (refuse vendor items); `require-delivery-item.ts`; `checkout/confirm-payment-by-reference.ts` (issues the code after payment) |
+| Assignment and briefing | `vendor-delivery/slot-briefing.ts`; `src/app/api/cron/vendor-slot-briefing/route.ts`; `src/lib/cron-auth.ts`; `delivery/assign-delivery.ts` (fix: a vendor collected by several deliverers in one slot no longer has the first deliverer's pickup code wiped by the second assignment) |
+| UI and API | `src/app/admin/delivery-operations/page.tsx`, `api/marketplace/admin/delivery-operations/**`, `src/app/deliverer/_components/*`, `src/app/deliverer/page.tsx`, `api/marketplace/deliverer/{manifest,bookings/**}`, `order/list-buyer-orders.ts`, `src/app/orders/page.tsx`, `AdminMainMenu.tsx`, `notifications/email.service.ts` (2 templates) |
+| Schema | migration `20261020120000_vendor_delivery_handover` (adds `DeliveryHandoverCode`, `DeliveryCodeSubmission`, `SlotBriefingNotice` and `DeliveryShiftCheckIn` in schema `marketplace`, plus `DeliveryRosterSettings.checkInLocation`; nothing in `public`), `prisma/schema.prisma`, `db/runtime-grants.json`, `db/provision/marketplace-roles.sql` (identical to the generator's output) |
+| Config and docs | `.env.example` (`DELIVERY_CODE_SECRET`), `src/instrumentation.ts` (warning), `README.md` |
+
+### Tests (local replica, 2026-10-19)
+
+- `npm test`: **202/202 pass**. That includes the new `vendor-delivery-rules.test.ts` (12 tests, no database) and
+  `vendor-delivery-handover.test.ts` (12 tests, including shift check-in, gating and missed shifts).
+- Two existing tests were updated for intended changes:
+  - the roster test refunds through the admin path instead of the deleted vendor "fail"
+  - the vendor-payment test now counts the student's new code email separately.
+- `npm run lint`, `npm run typecheck` and `npm run build`: clean. `npm run test:db:setup` applied the new
+  migration through the db-guard review.
+- Covered:
+  - **Cutoff:** 4:59/5:00/5:01, across midnight, longer-only admin cutoff, direct API call refused and the summary
+    agreeing, and a payment started before the cutoff still completing.
+  - **Code:** issued only after verified payment, once (replayed confirmation), never in subject, outbox or
+    notification. The student sees it; the card and API show only the mask.
+  - **Vendors:** can't mark ready, and paid items are assignable.
+  - **Confirmation:** a wrong code counts, another deliverer gets 404, the mask is refused. The correct code
+    completes it once, sets escrow to payout-eligible, and starts the 24 h dispute window. A replay is idempotent,
+    and a reused `submissionId` is refused.
+  - **Lock:** after 5 wrong codes, then an admin reissue (with reason, audited) kills the old code.
+  - **Deadline:** a late correct code becomes LATE_REVIEW, an admin accept is recorded as an admin action, and a
+    second review is refused.
+  - **Reassignment:** with a reason, and the old pickup code dies.
+  - **Briefing:** not before T−2h; auto-assigns; admin and deliverer notified once; unpaid excluded; a second run
+    sends nothing.
+- **Not covered by automated tests:** the browser UI. I didn't click through it, and offline sync on a real phone
+  is untested.
+
+### Known limitations and open questions
+
+1. **AkadVerse compatibility.** Both apps share the data, and AkadVerse's code is unchanged:
+   - If AkadVerse still serves Vendor Market checkout or vendor dashboards, its checkout has no two-hour cutoff or
+     codes, and its vendors still see Ready/Fail. Its delivery code also still requires `READY_FOR_PICKUP` for
+     vendor items.
+   - Nothing it writes breaks the new flow. Still, decide whether Vendor Market now lives only here.
+2. **One meeting point for everyone.** It's a single setting, because all deliverers are currently male. **This
+   must change once female deliverers join:** they will need separate meeting points (and probably separate
+   admins to check them in). `DeliveryRosterSettings.checkInLocation` and `shift.ts` are the places to change.
+   After a slot ends, a missed shift can only be unlocked by an admin with a reason, and it stays on the
+   deliverer's record. A missed shift's deliveries need reassigning or unlocking; admins are notified, but nothing
+   reassigns them automatically.
+2a. **Vendor manager = admin** (decided with the owner). There is no separate role. The phone number on the card is
+   the deliverer's; vendor contact is the vendor's own published `contactInfo`. There is no calling integration.
+3. **Offline codes sit in localStorage in plaintext** until synced (at most 48 h). Anyone with the unlocked phone
+   or script access to the site could read them.
+4. The per-item **retry after a failed attempt** (24 h, existing) extends the confirmation deadline, but the
+   delivery-retry job that returns items to the pool is one of the unscheduled AkadVerse jobs (README).
+5. The vendor "prep deadline" (`vendorPrepDeadlineMins`) and the fixed 30-min deliverer arrival rule are kept as
+   information on the card. Nothing waits on the vendor any more.
+6. **Vendor payouts still don't wait for the 24 h dispute window** (only deliverer payouts do). This is unchanged,
+   and needs a decision.
+7. **Production steps (need approval):**
+   - `npm run db:migrate` (applies both pending migrations)
+   - set `DELIVERY_CODE_SECRET` on Vercel
+   - point cron-job.org at the briefing endpoint.
+
 ## 1. Files changed (Marketplace only)
 
 | Kind | Files |

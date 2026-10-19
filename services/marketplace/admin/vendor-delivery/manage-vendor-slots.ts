@@ -8,6 +8,7 @@
 import { prisma } from "@/lib/prisma";
 import { badRequest, notFound } from "@/lib/service-error";
 import { logAdminAction } from "@/services/marketplace/admin/shared/log-admin-action";
+import { MIN_ORDER_CUTOFF_MINS } from "@/services/marketplace/vendor-delivery/is-slot-bookable";
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -48,7 +49,7 @@ export async function createVendorSlot(input: VendorSlotInput, adminUserId: stri
       label: input.label.trim(),
       windowStart: input.windowStart,
       windowEnd: input.windowEnd,
-      bookingCutoffMins: input.bookingCutoffMins ?? 90,
+      bookingCutoffMins: input.bookingCutoffMins ?? MIN_ORDER_CUTOFF_MINS,
       vendorPrepDeadlineMins: input.vendorPrepDeadlineMins ?? 30,
       delivererCapacity: input.delivererCapacity ?? 1,
       active: input.active ?? true,

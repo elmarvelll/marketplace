@@ -9,14 +9,16 @@ import { prisma } from "@/lib/prisma";
 import { conflict, badRequest } from "@/lib/service-error";
 import { verifyOtp } from "@/lib/otp";
 import { recordOrderEvent } from "@/services/marketplace/order/record-order-event";
-import { recomputeOrderDeliveryOutcome } from "@/services/marketplace/order/recompute-order-delivery-outcome";
-import { markItemEligibleForPayout } from "@/services/marketplace/escrow/mark-item-eligible-for-payout";
+import { completeDeliveredItem } from "./shared/complete-delivered-item";
 import { createNotification } from "@/services/marketplace/notifications/notification.service";
 import { requireDeliveryItem } from "./shared/require-delivery-item";
 
 export async function confirmDelivery(delivererId: string, deliveryItemId: string, suppliedOtp: string) {
   const deliveryItem = await requireDeliveryItem(delivererId, deliveryItemId);
   if (deliveryItem.status !== "OUT_FOR_DELIVERY") throw conflict("Only an item out for delivery can be confirmed delivered.");
+  // Vendor Market deliveries are confirmed per booking with the student's code
+  // (vendor-delivery/handover/submit-delivery-code.ts), never per item.
+  if (deliveryItem.orderItem.order.vendorDeliveryBookingId) throw conflict("Confirm this delivery from its delivery card with the student's code.");
 
   const orderId = deliveryItem.orderItem.orderId;
   const result = verifyOtp({
@@ -39,28 +41,12 @@ export async function confirmDelivery(delivererId: string, deliveryItemId: strin
   if (!result.ok) throw badRequest(`OTP verification failed: ${result.reason}.`);
 
   const now = new Date();
-  await prisma.$transaction(async (tx) => {
-    await tx.deliveryItem.update({ where: { id: deliveryItemId }, data: { status: "DELIVERED" } });
-    await tx.orderItem.update({
-      where: { id: deliveryItem.orderItemId },
-      data: {
-        deliveryStatus: "DELIVERED",
-        deliveryAttempted: "TRUE",
-        deliveryConfirmedAt: now,
-        // Single-use: the verified code must not be reusable/replayable
-        // once spent — same rationale as confirm-seller-dropoff.ts's
-        // dropoffOtp nulling.
-        deliveryOtp: null,
-        deliveryOtpExpiry: null,
-      },
-    });
-    await recordOrderEvent(tx, { orderId, orderItemId: deliveryItem.orderItemId, type: "BUYER_OTP_VERIFIED", actorType: "deliverer", actorId: delivererId });
-    await recordOrderEvent(tx, { orderId, orderItemId: deliveryItem.orderItemId, type: "DELIVERY_ATTEMPTED", actorType: "deliverer", actorId: delivererId, metadata: { attempted: true } });
-    await recordOrderEvent(tx, { orderId, orderItemId: deliveryItem.orderItemId, type: "DELIVERED", actorType: "deliverer", actorId: delivererId });
-    await markItemEligibleForPayout(tx, deliveryItem.orderItemId, orderId);
-    await recomputeOrderDeliveryOutcome(tx, orderId);
-  },
-{timeout: 15000});
+  await prisma.$transaction(
+    async (tx) => {
+      await completeDeliveredItem(tx, { deliveryItemId, orderItemId: deliveryItem.orderItemId, orderId }, { delivererId, now });
+    },
+    { timeout: 15000 }
+  );
 
   await createNotification({
     recipientId: deliveryItem.orderItem.order.userId,

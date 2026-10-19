@@ -39,8 +39,8 @@ export async function assignDelivery(delivererId: string | undefined, orderItemI
       id: true,
       quantity: true,
       orderId: true,
-      product: { select: { businessId: true, business: { select: { name: true } } } },
-      side: { select: { businessId: true, business: { select: { name: true } } } },
+      product: { select: { businessId: true, business: { select: { name: true, type: true } } } },
+      side: { select: { businessId: true, business: { select: { name: true, type: true } } } },
       order: { select: { userId: true, estimatedDeliveryAt: true } },
     },
   });
@@ -63,13 +63,13 @@ export async function assignDelivery(delivererId: string | undefined, orderItemI
   // different delivery dates, and each business's pickupOtp should expire
   // relative to *its own* order(s), not another business's in the same
   // batch.
-  const businesses = new Map<string, { name: string; earliestEstimate: Date | null }>();
+  const businesses = new Map<string, { name: string; earliestEstimate: Date | null; isVendor: boolean }>();
   for (const item of items) {
     const { businessId, business } = businessOf(item);
     const existing = businesses.get(businessId);
     const estimate = item.order.estimatedDeliveryAt;
     if (!existing) {
-      businesses.set(businessId, { name: business.name, earliestEstimate: estimate });
+      businesses.set(businessId, { name: business.name, earliestEstimate: estimate, isVendor: business.type === "SCHOOL_VENDOR" });
     } else if (estimate && (!existing.earliestEstimate || estimate < existing.earliestEstimate)) {
       existing.earliestEstimate = estimate;
     }
@@ -99,16 +99,28 @@ export async function assignDelivery(delivererId: string | undefined, orderItemI
     // this batch — the handoff is between one deliverer and one business
     // at a time, even though a Delivery run can span several businesses.
     const createdHandoffs: { businessId: string; businessName: string; pickupOtp: string; pickupOtpExpiry: string }[] = [];
-    for (const [businessId, { name, earliestEstimate: businessEstimate }] of businesses) {
+    for (const [businessId, { name, earliestEstimate: businessEstimate, isVendor }] of businesses) {
       // Reassignment guard: if this business already has an unconfirmed
       // handoff (from an earlier assignDelivery call, possibly to a
       // different deliverer) that pickup OTP must die here — an old
       // deliverer's code must never remain valid once the business's
       // parcel has been reassigned. See docs/marketplace/security/otp-security.md.
-      const stalePending = await tx.delivery_x_businesses.findMany({
+      // A School Vendor can be collected from by several deliverers in the same
+      // slot, each with their own code: there, another deliverer's code dies
+      // only once they hold nothing left to collect from this vendor (the
+      // upserts above already moved any reassigned items).
+      const pending = await tx.delivery_x_businesses.findMany({
         where: { businessId, delivererConfirmedPickupAt: null, pickupOtp: { not: null } },
-        select: { id: true },
+        select: { id: true, deliverymanId: true },
       });
+      const stalePending = [];
+      for (const row of pending) {
+        const stillCollecting =
+          isVendor &&
+          row.deliverymanId !== cleanDelivererId &&
+          (await tx.deliveryItem.count({ where: { businessId, status: "ASSIGNED", delivery: { deliverymanId: row.deliverymanId } } })) > 0;
+        if (!stillCollecting) stalePending.push(row);
+      }
       if (stalePending.length > 0) {
         await tx.delivery_x_businesses.updateMany({
           where: { id: { in: stalePending.map((row) => row.id) } },

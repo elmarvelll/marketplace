@@ -225,6 +225,51 @@ export function buyerDeliveryOtpEmail(params: { orderId: string; otp: string; ex
   };
 }
 
+// Vendor Market: the student's handover code for one delivery booking, sent
+// once after payment is verified (services/marketplace/vendor-delivery/
+// handover/handover-code.ts). Sent directly, never through the outbox, so the
+// code is not persisted in EmailDelivery; the subject carries no digits.
+export function studentVendorDeliveryCodeEmail(params: { code: string; deliveryDate: string; slotLabel: string; reissued?: boolean }) {
+  return {
+    type: "student_vendor_delivery_code",
+    subject: params.reissued ? "Your new delivery code" : "Your order is confirmed — delivery code inside",
+    html: layout(params.reissued ? "Your new delivery code" : "Order confirmed", `
+      <p>Your Vendor Market order will be delivered on <strong>${escapeHtml(params.deliveryDate)}</strong>, <strong>${escapeHtml(params.slotLabel)}</strong>.</p>
+      <p>Your delivery code is:</p>
+      <p style="font-size:28px; font-weight:700; letter-spacing:4px;">${escapeHtml(params.code)}</p>
+      <p><strong>Only give this code to the deliverer after you have received and checked your order.</strong> The deliverer can see only part of it and needs all six digits from you.</p>
+      ${params.reissued ? "<p>Any earlier code for this delivery no longer works.</p>" : ""}
+      <p>You can also see it any time in <a href="${appUrl("/orders")}">My Orders</a>.</p>
+    `),
+  };
+}
+
+// Pre-slot briefing for an assigned deliverer (services/marketplace/
+// vendor-delivery/slot-briefing.ts). Counts and pickup points only — no
+// student contact details or codes; those are in the authenticated manifest.
+export function delivererSlotBriefingEmail(params: {
+  delivererName: string;
+  deliveryDate: string;
+  slotLabel: string;
+  arriveBy: string;
+  meetingPoint: string | null;
+  studentDeliveries: number;
+  vendorPickups: { name: string; location: string | null }[];
+}) {
+  const pickups = params.vendorPickups.map((v) => `<li>${escapeHtml(v.name)}${v.location ? ` — ${escapeHtml(v.location)}` : ""}</li>`).join("");
+  return {
+    type: "deliverer_slot_briefing",
+    subject: `Your deliveries for ${params.slotLabel}`,
+    html: layout("Upcoming delivery slot", `
+      <p>Hi ${escapeHtml(params.delivererName)}, you're assigned to <strong>${escapeHtml(params.deliveryDate)}, ${escapeHtml(params.slotLabel)}</strong>.</p>
+      <p><strong>${params.studentDeliveries}</strong> student deliver${params.studentDeliveries === 1 ? "y" : "ies"}, from <strong>${params.vendorPickups.length}</strong> vendor pickup${params.vendorPickups.length === 1 ? "" : "s"}:</p>
+      <ul>${pickups}</ul>
+      <p>Report to <strong>${escapeHtml(params.meetingPoint ?? "the meeting point")}</strong> by <strong>${escapeHtml(params.arriveBy)}</strong>. An admin will check you in, start your shift and give you your delivery card — you can't collect or deliver before that. Then pick up at each vendor using the pickup code they show you.</p>
+      <p>Your delivery card — addresses, items and the partial delivery codes — is in your <a href="${appUrl("/deliverer")}">deliverer dashboard</a>.</p>
+    `),
+  };
+}
+
 // Seller -> Coordinator drop-off OTP — see
 // services/marketplace/order/initiate-order-dropoff.ts. Sent immediately
 // on issuance (not via a reminder cron) since the 30-minute window is too

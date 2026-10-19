@@ -22,14 +22,6 @@ export interface BookableSlot {
   bookingCutoffMins: number;
 }
 
-// A calendar date (year/month/day only, no time-of-day) — the shape
-// `todayInSchoolTimezone()`/`parseAndValidateDeliveryDate()` produce, and
-// what `VendorDeliveryBooking.bookedFor` stores. Compared by calendar day,
-// never by exact instant.
-function isSameSchoolDay(a: Date, b: Date): boolean {
-  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth() && a.getUTCDate() === b.getUTCDate();
-}
-
 // "Now," expressed as the wall-clock date/time it actually is in
 // SCHOOL_TIMEZONE — computed via Intl rather than assuming the server's
 // own local time equals school time.
@@ -66,25 +58,42 @@ export function slotWindowStartToday(windowStart: string, referenceNow: Date = n
   return start;
 }
 
-// True if a booking made right now, for `targetDate` (defaults to today —
-// a customer choosing a future delivery date, spec §4-6), would still leave
-// at least slot.bookingCutoffMins before the slot's window opens *if that
-// date is today*. The cutoff-minutes rule only makes sense for same-day
-// bookings — a slot on a future date is bookable purely on capacity, never
-// blocked by "too close to the window" since the window hasn't started
-// counting down yet. A same-day slot whose window has already passed today
-// is never bookable (negative margin), independent of the cutoff.
-// Boundary: exactly bookingCutoffMins remaining is bookable — the spec's
-// rule text is "cannot book if less than 1h30 before," so exactly 1h30
-// before is the last bookable instant (>=, not >).
-export function isSlotBookable(slot: BookableSlot, now: Date = new Date(), targetDate?: Date): boolean {
+// Every slot closes to NEW orders this long before its window starts
+// (operations: deliverers are briefed and assigned two hours ahead — see
+// services/marketplace/vendor-delivery/slot-briefing.ts). An admin may set a
+// longer per-slot bookingCutoffMins; a shorter one is never honored.
+export const MIN_ORDER_CUTOFF_MINS = 120;
+
+export function effectiveCutoffMins(slot: Pick<BookableSlot, "bookingCutoffMins">): number {
+  return Math.max(MIN_ORDER_CUTOFF_MINS, slot.bookingCutoffMins ?? 0);
+}
+
+// Minutes from `now` until the slot's window opens on `targetDate` (defaults
+// to today), both measured as school wall-clock time — so a slot just after
+// midnight tomorrow is correctly "soon" late tonight. Negative once started.
+export function minutesUntilSlotStart(windowStart: string, now: Date = new Date(), targetDate?: Date): number {
   const schoolNow = nowInSchoolTimezone(now);
-  if (targetDate && !isSameSchoolDay(targetDate, schoolNow)) {
-    // A future date is never "too late" to book — only same-day bookings
-    // are subject to the pre-window cutoff.
-    return true;
-  }
-  const windowStartToday = slotWindowStartToday(slot.windowStart, now);
-  const minutesUntilWindow = (windowStartToday.getTime() - schoolNow.getTime()) / 60000;
-  return minutesUntilWindow >= slot.bookingCutoffMins;
+  const start = slotWindowStartToday(windowStart, now, targetDate ?? schoolNow);
+  return (start.getTime() - schoolNow.getTime()) / 60000;
+}
+
+// True if a NEW order may still be placed now for this slot on `targetDate`
+// (defaults to today). Strict: with exactly the cutoff remaining the slot is
+// already closed (7-8 PM slot: 4:59 PM bookable, 5:00 PM not). Applies to
+// creating orders only — a checkout already initialized before the cutoff
+// may still be paid within its existing payment hold (confirm-payment never
+// calls this).
+export function isSlotBookable(slot: BookableSlot, now: Date = new Date(), targetDate?: Date): boolean {
+  return minutesUntilSlotStart(slot.windowStart, now, targetDate) > effectiveCutoffMins(slot);
+}
+
+// The real instant (UTC) a school wall-clock time on `date` corresponds to —
+// for scheduling and deadlines, which compare against `new Date()`.
+export function schoolTimeToInstant(date: Date, hhmm: string): Date {
+  const [hour, minute] = hhmm.split(":").map(Number);
+  const wall = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), hour, minute, 0, 0);
+  // Africa/Lagos has a fixed offset (no DST), so the offset at `wall` is the offset now.
+  const probe = new Date(wall);
+  const offsetMs = nowInSchoolTimezone(probe).getTime() - Math.floor(probe.getTime() / 1000) * 1000;
+  return new Date(wall - offsetMs);
 }

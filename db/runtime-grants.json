@@ -55,6 +55,10 @@
     "RosterSlotDay": { "why": "Recurring per-weekday delivery limit of a slot (upserted; removed when reset to the default).", "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"] },
     "RosterAssignment": { "why": "Recurring weekly deliverer assignments (added/removed by an admin).", "privileges": ["SELECT", "INSERT", "DELETE"] },
     "RosterException": { "why": "Date-specific roster overrides (set and restored by an admin).", "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"] },
-    "ScheduledDelivery": { "why": "Per-order slot occurrence and planned deliverer (history kept, never deleted).", "privileges": ["SELECT", "INSERT", "UPDATE"] }
+    "ScheduledDelivery": { "why": "Per-order slot occurrence and planned deliverer (history kept, never deleted).", "privileges": ["SELECT", "INSERT", "UPDATE"] },
+    "DeliveryHandoverCode": { "why": "Student handover code per vendor booking (hash + server-encrypted copy + masked view); attempts and verification.", "privileges": ["SELECT", "INSERT", "UPDATE"] },
+    "DeliveryCodeSubmission": { "why": "Audit/idempotency record of each delivery-code submission; admin review of late ones.", "privileges": ["SELECT", "INSERT", "UPDATE"] },
+    "SlotBriefingNotice": { "why": "Pre-slot briefing sent-record (deleted only when a send failed, so the next run retries it).", "privileges": ["SELECT", "INSERT", "DELETE"] },
+    "DeliveryShiftCheckIn": { "why": "Admin check-in that starts a deliverer's shift (gates their pickups/deliveries; append-only).", "privileges": ["SELECT", "INSERT"] }
   }
 }

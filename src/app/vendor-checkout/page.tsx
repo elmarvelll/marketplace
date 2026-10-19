@@ -25,6 +25,7 @@ import Image from "next/image";
 import { isAxiosError } from "axios";
 import { AlertCircle, CheckCircle2, Clock, Loader2, MapPin, ShoppingBag } from "lucide-react";
 import api from "@/lib/axios";
+import { groupVendorCart } from "@/app/_components/group-vendor-cart";
 import { confirmPayment, openPaystackCheckout, reportCancelled } from "../checkout/_components/paystackCheckout";
 import DeliveryDatePicker, { todayIsoDate } from "./_components/DeliveryDatePicker";
 import type { VendorCartLineItem } from "@/types/vendor-cart";
@@ -242,27 +243,44 @@ export default function VendorCheckoutPage() {
 
             <section className="bg-white rounded-2xl border border-gray-100 p-6 mb-6">
               <h2 className="font-semibold text-gray-900 mb-4">Your order</h2>
-              <div className="space-y-4">
-                {summary.items.map((item) => (
-                  <div key={item.id} className="flex gap-3">
-                    <div className="relative w-14 h-14 rounded-xl overflow-hidden bg-gray-100 shrink-0">
-                      {item.image ? (
-                        <Image src={item.image} alt={item.name} fill sizes="56px" className="object-cover" />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center text-gray-500 text-[10px]">
-                          {item.kind === "side" ? "Side" : "No image"}
+              <div className="space-y-5">
+                {groupVendorCart(summary.items).map((group) => (
+                  <div key={group.businessId}>
+                    <p className="text-xs font-semibold text-gray-500 mb-3">From {group.vendorName}</p>
+                    <div className="space-y-4">
+                      {group.mains.map((item) => (
+                        <div key={item.id} className="flex gap-3">
+                          <div className="relative w-14 h-14 rounded-xl overflow-hidden bg-gray-100 shrink-0">
+                            {item.image ? (
+                              <Image src={item.image} alt={item.name} fill sizes="56px" className="object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center text-gray-500 text-[10px]">No image</div>
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
+                            {item.variantName && <p className="text-xs text-gray-500">{item.variantName}</p>}
+                            <p className="text-xs text-gray-500 mt-0.5">Qty {item.quantity}</p>
+                          </div>
+                          <p className="text-sm font-semibold text-gray-900 shrink-0">₦{nairaFormatter.format(item.price * item.quantity)}</p>
                         </div>
-                      )}
+                      ))}
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
-                      <p className="text-xs text-gray-500">by {item.vendorName}</p>
-                      {item.variantName && <p className="text-xs text-gray-500">{item.variantName}</p>}
-                      <p className="text-xs text-gray-500 mt-0.5">Qty {item.quantity}</p>
-                    </div>
-                    <p className="text-sm font-semibold text-gray-900 shrink-0">
-                      ₦{nairaFormatter.format(item.price * item.quantity)}
-                    </p>
+                    {group.sides.length > 0 && (
+                      <div className={group.mains.length > 0 ? "mt-3 ml-4 pl-3 border-l-2 border-purple-100" : ""}>
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-purple-700 mb-1.5">Sides</p>
+                        <ul className="space-y-1.5">
+                          {group.sides.map((item) => (
+                            <li key={item.id} className="flex items-center justify-between gap-2 text-sm">
+                              <span className="text-gray-800 min-w-0 truncate">
+                                {item.quantity} x {item.name}
+                              </span>
+                              <span className="font-medium text-gray-900 shrink-0">₦{nairaFormatter.format(item.price * item.quantity)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

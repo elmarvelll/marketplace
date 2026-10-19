@@ -15,6 +15,9 @@ import { requireDeliveryItem } from "./shared/require-delivery-item";
 export async function markOutForDelivery(delivererId: string, deliveryItemId: string) {
   const deliveryItem = await requireDeliveryItem(delivererId, deliveryItemId);
   if (deliveryItem.status !== "PICKED_UP") throw conflict("Only a picked-up item can be marked out for delivery.");
+  // Vendor Market deliveries start per booking and use the student's booking
+  // code issued at payment — no per-item code is issued for them.
+  if (deliveryItem.orderItem.order.vendorDeliveryBookingId) throw conflict("Start this delivery from its delivery card.");
 
   const otp = generateOtp();
   const otpExpiry = buildOtpExpiry();

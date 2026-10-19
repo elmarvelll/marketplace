@@ -14,7 +14,7 @@ import { PAID_ORDER } from "@/services/marketplace/order/shared/paid-order";
 export async function rejectOrderItem(businessId: string, orderId: string, itemId: string, actorUserId: string, reason: string) {
   if (!reason.trim()) throw badRequest("A rejection reason is required.");
 
-  const order = await prisma.order.findFirst({ where: { id: orderId, businessId, ...PAID_ORDER }, select: { id: true, status: true } });
+  const order = await prisma.order.findFirst({ where: { id: orderId, businessId, ...PAID_ORDER, business: { type: "BUSINESS" } }, select: { id: true, status: true } });
   if (!order) throw notFound("Order not found.");
   if (order.status !== "ACCEPTED") throw conflict("Only items on an accepted order can be individually rejected.");
 

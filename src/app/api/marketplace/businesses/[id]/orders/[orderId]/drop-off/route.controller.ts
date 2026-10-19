@@ -9,12 +9,12 @@
 
 import { NextResponse } from "next/server";
 import { runController } from "@/lib/controller-helpers";
-import { requireOwnedBusiness } from "@/services/marketplace/business/business-ownership.service";
+import { requireOwnedBusinessOnly } from "@/services/marketplace/business/business-ownership.service";
 import { initiateOrderDropoff } from "@/services/marketplace/order/initiate-order-dropoff";
 
 export async function confirmDropoff(businessId: string, orderId: string): Promise<NextResponse> {
   return runController(async () => {
-    const owned = await requireOwnedBusiness(businessId);
+    const owned = await requireOwnedBusinessOnly(businessId);
     if (!owned) {
       return NextResponse.json({ error: "Business not found or not owned by the current user." }, { status: 404 });
     }

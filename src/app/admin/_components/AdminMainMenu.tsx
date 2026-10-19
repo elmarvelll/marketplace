@@ -27,6 +27,8 @@ const TABS = [
   // Recurring weekly delivery roster for both operations — see
   // services/marketplace/delivery-roster/.
   { href: "/admin/delivery-roster", label: "Delivery Roster" },
+  // Day-to-day Vendor Market delivery control center (vendor manager = admin).
+  { href: "/admin/delivery-operations", label: "Delivery Operations" },
 ];
 
 export default function AdminMainMenu() {

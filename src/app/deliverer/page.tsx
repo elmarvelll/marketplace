@@ -4,20 +4,22 @@
 // "Delivery Dashboard" link once a deliverer is approved (see
 // services/marketplace/deliverer/deliverer.service.ts); every API call here still 403s server-side for a
 // non-approved deliverer regardless of how someone reaches this URL. Shows
-// pending pickup handoffs (with the seller<->deliverer OTP entry) and every
-// assigned delivery item across its lifecycle. The deliverer never adds
-// items manually — everything shown here came from a business marking it
-// READY_FOR_PICKUP and the delivery coordinator assigning it. See
-// docs/marketplace/systems/deliverer-system.md.
+// the Vendor Market delivery cards (one per slot, confirmed per student with
+// the student's code — see _components/DeliveryCards.tsx), pending pickup
+// handoffs (with the seller<->deliverer OTP entry) and every assigned
+// Business delivery item across its lifecycle. The deliverer never adds
+// items manually — everything shown here was assigned by an admin or the
+// roster. See docs/marketplace/systems/deliverer-system.md.
 
 "use client";
 
 import { useEffect, useState } from "react";
 import { isAxiosError } from "axios";
-import { AlertCircle, CalendarClock, Loader2, Package, Truck } from "lucide-react";
+import { AlertCircle, CalendarClock, ClipboardList, Loader2, Package, Truck } from "lucide-react";
 import DashboardNavbar from "@/app/components/dashboard/student/DashboardNavbar";
 import api from "@/lib/axios";
 import MarketplacePageShell from "@/app/_components/MarketplacePageShell";
+import DeliveryCards, { type ManifestCard, type ShiftCounts } from "./_components/DeliveryCards";
 
 interface Handoff {
   id: string;
@@ -68,23 +70,30 @@ export default function DelivererDashboardPage() {
   const [handoffs, setHandoffs] = useState<Handoff[]>([]);
   const [items, setItems] = useState<DeliveryItemRow[]>([]);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
+  const [cards, setCards] = useState<ManifestCard[]>([]);
+  const [shiftCounts, setShiftCounts] = useState<ShiftCounts | undefined>();
   const [loadState, setLoadState] = useState<"loading" | "loaded" | "forbidden" | "error">("loading");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
-  const load = async () => {
-    setLoadState("loading");
+  // silent: refresh in place (after an action) without the full-page spinner.
+  const load = async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (!silent) setLoadState("loading");
     try {
-      const [handoffsRes, itemsRes, rosterRes] = await Promise.all([
+      const [handoffsRes, itemsRes, rosterRes, manifestRes] = await Promise.all([
         api.get<{ handoffs: Handoff[] }>("/marketplace/deliverer/handoffs"),
         api.get<{ items: DeliveryItemRow[] }>("/marketplace/deliverer/deliveries"),
         api.get<{ roster: RosterEntry[] }>("/marketplace/deliverer/roster"),
+        api.get<{ cards: ManifestCard[]; shiftCounts: ShiftCounts }>("/marketplace/deliverer/manifest"),
       ]);
       setHandoffs(handoffsRes.data.handoffs);
       setItems(itemsRes.data.items);
       setRoster(rosterRes.data.roster);
+      setCards(manifestRes.data.cards);
+      setShiftCounts(manifestRes.data.shiftCounts);
       setLoadState("loaded");
     } catch (err) {
+      if (silent && isAxiosError(err) && !err.response) return; // offline: keep showing what we have
       setLoadState(isAxiosError(err) && err.response?.status === 403 ? "forbidden" : "error");
     }
   };
@@ -103,7 +112,7 @@ export default function DelivererDashboardPage() {
     setError("");
     try {
       await action();
-      await load();
+      await load({ silent: true });
     } catch (err) {
       setError((isAxiosError<{ error?: string }>(err) && err.response?.data?.error) || "That action failed.");
     } finally {
@@ -165,14 +174,16 @@ export default function DelivererDashboardPage() {
   }
 
   const pendingHandoffs = handoffs.filter((h) => !h.delivererConfirmedPickupAt);
+  // Vendor Market items are handled on the delivery cards, per student.
+  const businessItems = items.filter((item) => item.businessType !== "SCHOOL_VENDOR");
 
   return (
     <MarketplacePageShell width="5xl" className="space-y-10">
-        <h1 className="text-2xl font-bold text-gray-900">Delivery Dashboard</h1>
+        <h1 className="text-2xl font-bold text-gray-900 print:hidden">Delivery Dashboard</h1>
 
         {error && <div className="text-sm p-3 rounded-lg text-red-700 bg-red-100">{error}</div>}
 
-        <section>
+        <section className="print:hidden">
           <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
             <CalendarClock size={16} className="text-gray-500" />
             Upcoming schedule
@@ -203,6 +214,14 @@ export default function DelivererDashboardPage() {
 
         <section>
           <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <ClipboardList size={16} className="text-gray-500" />
+            Vendor delivery cards
+          </h2>
+          <DeliveryCards cards={cards} shiftCounts={shiftCounts} onChanged={() => void load({ silent: true })} />
+        </section>
+
+        <section className="print:hidden">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
             <Package size={16} className="text-gray-500" />
             Pending pickups
           </h2>
@@ -230,16 +249,16 @@ export default function DelivererDashboardPage() {
           )}
         </section>
 
-        <section>
+        <section className="print:hidden">
           <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
             <Truck size={16} className="text-gray-500" />
-            Assigned items
+            Marketplace (Business) items
           </h2>
-          {items.length === 0 ? (
-            <p className="text-sm text-gray-500">No items assigned to you yet.</p>
+          {businessItems.length === 0 ? (
+            <p className="text-sm text-gray-500">No Business items assigned to you.</p>
           ) : (
             <div className="space-y-2">
-              {items.map((item) => (
+              {businessItems.map((item) => (
                 <div key={item.deliveryItemId} className="bg-white rounded-2xl border border-gray-100 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3 mb-2">
                     <div>

@@ -16,11 +16,15 @@
 // docs/marketplace/decisions/vendor-independent-architecture.md): a
 // Business item is only ready once the seller has physically dropped it
 // off at the central coordinator point (sellerDroppedOffAt, OTP-confirmed)
-// — there is no such point for a vendor. A vendor item is ready the
-// moment the vendor marks the order READY_FOR_PICKUP (see
-// mark-vendor-order-ready.ts); the deliverer then collects directly from
-// the vendor's own location instead of a coordinator.
+// — there is no such point for a vendor. A vendor item is ready as soon as
+// its order is paid and confirmed: vendors receive orders for information
+// only and never accept, reject or mark them ready (payment confirmation
+// auto-accepts — see confirm-payment-by-reference.ts). The deliverer then
+// collects directly from the vendor's own location. Like the Business
+// branch, fulfillmentStatus is not part of the gate, so an item returned to
+// the pool after a failed attempt qualifies again.
 import type { Prisma } from "@prisma/client";
+import { PAID_ORDER } from "@/services/marketplace/order/shared/paid-order";
 
 export const READY_ITEM_WHERE: Prisma.OrderItemWhereInput = {
   deliveryStatus: null,
@@ -28,6 +32,14 @@ export const READY_ITEM_WHERE: Prisma.OrderItemWhereInput = {
   cancelledAt: null,
   OR: [
     { order: { business: { type: "BUSINESS" }, sellerDroppedOffAt: { not: null } } },
-    { order: { business: { type: "SCHOOL_VENDOR" }, fulfillmentStatus: "READY_FOR_PICKUP" } },
+    {
+      order: {
+        business: { type: "SCHOOL_VENDOR" },
+        ...PAID_ORDER,
+        status: "ACCEPTED",
+        cancelledAt: null,
+        vendorDeliveryBooking: { status: "CONFIRMED" },
+      },
+    },
   ],
 };

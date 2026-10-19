@@ -37,6 +37,7 @@ import { notifyAdmins } from "@/services/marketplace/notifications/notification.
 import { ORDER_PAYMENT_STATUS } from "@/services/marketplace/order/shared/paid-order";
 import { resolveVendorCapacity } from "@/services/marketplace/vendor/capacity/resolve-vendor-capacity";
 import { countVendorBookingsForSlot } from "@/services/marketplace/vendor/capacity/manage-vendor-capacity";
+import { issueHandoverCodesAfterPayment } from "@/services/marketplace/vendor-delivery/handover/handover-code";
 import { reserveLine } from "./shared/stock-reservation";
 import { resolveOccurrence } from "@/services/marketplace/delivery-roster/roster-resolution";
 import { countReservedDeliveries, lockRosterOperation } from "@/services/marketplace/delivery-roster/roster-capacity";
@@ -247,6 +248,12 @@ async function afterPaid(payment: CheckoutPayment, newlyPaidIds: string[]) {
     console.error(`[checkout] clearing paid cart lines for ${payment.reference} failed`, err);
   }
   if (newlyPaidIds.length > 0) await createOrderPaidNotifications(newlyPaidIds);
+  // Vendor Market: the student's handover code, only now that the payment is
+  // verified and the booking CONFIRMED. Never throws.
+  if (payment.kind === "VENDOR" && newlyPaidIds.length > 0) {
+    const bookings = await prisma.vendorDeliveryBooking.findMany({ where: { paystackReference: payment.reference, status: "CONFIRMED" }, select: { id: true } });
+    await issueHandoverCodesAfterPayment(bookings.map((b) => b.id));
+  }
 }
 
 async function flagForReview(payment: CheckoutPayment, reason: string, providerStatus: string): Promise<ConfirmResult> {

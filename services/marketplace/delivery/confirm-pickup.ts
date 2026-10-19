@@ -15,6 +15,7 @@ import { recordOrderEvent } from "@/services/marketplace/order/record-order-even
 import { recomputeOrderDeliveryOutcome } from "@/services/marketplace/order/recompute-order-delivery-outcome";
 import { ownerDashboardPath } from "@/services/marketplace/business/owner-dashboard-path";
 import { createNotification } from "@/services/marketplace/notifications/notification.service";
+import { requireShiftCheckIn } from "@/services/marketplace/vendor-delivery/handover/shift";
 import { getMarketplaceSettings } from "@/services/marketplace/admin/shared/marketplace-settings";
 
 export async function confirmPickup(delivererId: string, handoffId: string, suppliedOtp: string) {
@@ -24,6 +25,20 @@ export async function confirmPickup(delivererId: string, handoffId: string, supp
   });
   if (!handoff) throw notFound("Handoff not found.");
   if (handoff.delivererConfirmedPickupAt) throw conflict("This handoff has already been confirmed.");
+
+  // Vendor Market: no collecting before an admin has checked the deliverer in
+  // for the shift(s) these items belong to (vendor-delivery/handover/shift.ts).
+  // Checked before the code, so a refused attempt doesn't use one up.
+  if (handoff.business.type === "SCHOOL_VENDOR") {
+    const pending = await prisma.deliveryItem.findMany({
+      where: { businessId: handoff.businessId, status: "ASSIGNED", delivery: { deliverymanId: delivererId } },
+      select: { orderItem: { select: { order: { select: { vendorDeliveryBooking: { select: { slotId: true, bookedFor: true } } } } } } },
+    });
+    const shifts = new Map(
+      pending.map((p) => p.orderItem.order.vendorDeliveryBooking).filter(Boolean).map((b) => [`${b!.slotId}|${b!.bookedFor.toISOString()}`, b!])
+    );
+    for (const b of shifts.values()) await requireShiftCheckIn(delivererId, b.slotId, b.bookedFor);
+  }
 
   const result = verifyOtp({
     suppliedCode: suppliedOtp,

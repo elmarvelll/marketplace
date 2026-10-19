@@ -1647,6 +1647,9 @@ enum DeliveryPlanSource {
 model DeliveryRosterSettings {
   operation            DeliveryOperation @id
   defaultMaxDeliveries Int?
+  // Where deliverers report to be checked in before a shift. One place per operation for now — all deliverers are
+  // male; separate meeting points will be needed once female deliverers join (see vendor-delivery/handover/shift.ts).
+  checkInLocation      String?
   updatedAt            DateTime          @updatedAt
   updatedBy            String?
 
@@ -1747,5 +1750,88 @@ model ScheduledDelivery {
 
   @@index([operation, slotId, date])
   @@index([plannedDelivererId])
+  @@schema("marketplace")
+}
+
+// Outcome of one delivery-code submission (see DeliveryCodeSubmission).
+enum DeliverySubmissionOutcome {
+  VERIFIED
+  REJECTED
+  LATE_REVIEW
+
+  @@schema("marketplace")
+}
+
+// The student's handover code for one Vendor delivery booking. Never stored in plaintext: codeHash verifies it,
+// codeCipher lets the student see it again, maskedCode ("1_3_5_") is all a deliverer or admin ever sees.
+// See src/lib/delivery-code.ts and services/marketplace/vendor-delivery/handover/.
+model DeliveryHandoverCode {
+  id             String    @id @default(uuid())
+  bookingId      String    @unique
+  codeHash       String
+  codeCipher     String
+  maskedCode     String
+  failedAttempts Int       @default(0)
+  issuedAt       DateTime  @default(now())
+  issuedBy       String?
+  verifiedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@schema("marketplace")
+}
+
+// Every delivery-code submission, online or synced from a deliverer's offline queue. submissionId is the client's
+// idempotency key. receivedAt (server time) decides the 24-hour deadline; clientRecordedAt is audit-only. The submitted
+// code is never stored — only whether it matched.
+model DeliveryCodeSubmission {
+  id               String                    @id @default(uuid())
+  submissionId     String                    @unique
+  bookingId        String
+  delivererId      String
+  outcome          DeliverySubmissionOutcome
+  reason           String?
+  codeMatched      Boolean
+  deadlineAt       DateTime
+  clientRecordedAt DateTime?
+  receivedAt       DateTime                  @default(now())
+  reviewedAt       DateTime?
+  reviewedBy       String?
+  reviewDecision   String?
+  reviewNote       String?
+
+  @@index([bookingId])
+  @@index([outcome, reviewedAt])
+  @@schema("marketplace")
+}
+
+// One row per pre-slot briefing sent (slot occurrence x recipient) — the idempotency record for slot-briefing.ts.
+model SlotBriefingNotice {
+  id           String            @id @default(uuid())
+  operation    DeliveryOperation
+  slotId       String
+  date         DateTime          @db.Date
+  recipientKey String
+  sentAt       DateTime          @default(now())
+
+  @@unique([operation, slotId, date, recipientKey])
+  @@schema("marketplace")
+}
+
+// A deliverer's shift for one slot occurrence was started: an admin (vendor manager) checked them in at the meeting
+// point and handed over their card. Gates their pickups and deliveries; none by the slot's end = missed. late = an
+// admin unlocked it after the slot ended (still counted as missed). See vendor-delivery/handover/shift.ts.
+model DeliveryShiftCheckIn {
+  id          String            @id @default(uuid())
+  operation   DeliveryOperation
+  slotId      String
+  date        DateTime          @db.Date
+  delivererId String
+  checkedInAt DateTime          @default(now())
+  checkedInBy String
+  late        Boolean           @default(false)
+  note        String?
+
+  @@unique([operation, slotId, date, delivererId])
   @@schema("marketplace")
 }

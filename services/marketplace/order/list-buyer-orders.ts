@@ -10,6 +10,7 @@
 import { prisma } from "@/lib/prisma";
 import { formatEstimatedDelivery } from "@/services/marketplace/delivery/estimated-delivery.service";
 import { PAID_ORDER } from "@/services/marketplace/order/shared/paid-order";
+import { getStudentDeliveryCodes } from "@/services/marketplace/vendor-delivery/handover/handover-code";
 
 export async function listBuyerOrders(userId: string) {
   const orders = await prisma.order.findMany({
@@ -30,6 +31,7 @@ export async function listBuyerOrders(userId: string) {
       isDisputed: true,
       disputeResolvedAt: true,
       business: { select: { name: true, type: true } },
+      vendorDeliveryBooking: { select: { id: true, status: true, bookedFor: true, slot: { select: { label: true } } } },
       items: {
         select: {
           id: true,
@@ -46,6 +48,12 @@ export async function listBuyerOrders(userId: string) {
       },
     },
   });
+
+  // Vendor Market: one handover code per booking, shown only to this student.
+  const codes = await getStudentDeliveryCodes(
+    userId,
+    Array.from(new Set(orders.map((o) => o.vendorDeliveryBooking).filter((b) => b?.status === "CONFIRMED").map((b) => b!.id)))
+  );
 
   return orders.map((order) => {
     const estimate =
@@ -72,6 +80,15 @@ export async function listBuyerOrders(userId: string) {
       deliveryWindow: estimate?.window ?? null,
       isDisputed: order.isDisputed,
       disputeResolvedAt: order.disputeResolvedAt?.toISOString() ?? null,
+      vendorDelivery: order.vendorDeliveryBooking
+        ? {
+            reference: order.vendorDeliveryBooking.id.slice(0, 8).toUpperCase(),
+            date: order.vendorDeliveryBooking.bookedFor.toISOString().slice(0, 10),
+            slotLabel: order.vendorDeliveryBooking.slot.label,
+            code: codes.get(order.vendorDeliveryBooking.id)?.code ?? null,
+            delivered: codes.get(order.vendorDeliveryBooking.id)?.delivered ?? false,
+          }
+        : null,
       items: order.items.map((item) => ({
         id: item.id,
         productName: item.product?.name ?? item.side?.name ?? "Unknown item",

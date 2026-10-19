@@ -169,8 +169,8 @@ function SlotCapacityEditor() {
                 className="w-16 px-2 py-1 border border-gray-400 bg-white rounded-lg text-xs text-gray-900"
               />
             </label>
-            <label className="flex items-center gap-1.5 text-xs text-gray-500">
-              Cutoff (min)
+            <label className="flex items-center gap-1.5 text-xs text-gray-500" title="Orders close at least 120 minutes before the slot starts; a smaller number here has no effect.">
+              Cutoff (min, ≥120)
               <input
                 type="number"
                 min={0}

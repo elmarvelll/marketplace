@@ -5,12 +5,12 @@
 
 import { NextResponse } from "next/server";
 import { runController } from "@/lib/controller-helpers";
-import { requireOwnedBusiness } from "@/services/marketplace/business/business-ownership.service";
+import { requireOwnedBusinessOnly } from "@/services/marketplace/business/business-ownership.service";
 import { acceptOrder as acceptOrderAction } from "@/services/marketplace/order/accept-order";
 
 export async function acceptOrder(businessId: string, orderId: string): Promise<NextResponse> {
   return runController(async () => {
-    const owned = await requireOwnedBusiness(businessId);
+    const owned = await requireOwnedBusinessOnly(businessId);
     await acceptOrderAction(owned.businessId, orderId, owned.session.user.id);
     return NextResponse.json({ message: "Order accepted." });
   });

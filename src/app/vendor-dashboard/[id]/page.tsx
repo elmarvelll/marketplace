@@ -79,17 +79,21 @@ interface CapacityRow {
 // Editing a slot's capacity NEVER sends a request while the vendor is
 // typing (spec §3) — inputs are controlled local state, and the only
 // backend call is the single explicit "Save Capacity" click below, which
-// batches every changed row. Date-specific (spec §7): the vendor picks a
-// date (defaults to today, same Today/Tomorrow/custom picker as checkout)
-// and edits/saves capacity for that date's override, falling back to the
-// "Default" recurring value when no override exists yet.
+// batches every changed row. Two modes: "default" edits the recurring
+// VendorTimeframeCapacity that applies to every delivery day (so the vendor
+// sets it once), and "date" edits one date's override (spec §7) for when a
+// particular day needs a different number, falling back to the default.
 function CapacitySection({ businessId, reloadKey = 0 }: { businessId: string; reloadKey?: number }) {
+  const [mode, setMode] = useState<"default" | "date">("default");
   const [date, setDate] = useState(() => todayIsoDate());
   const [rows, setRows] = useState<CapacityRow[]>([]);
   const [draft, setDraft] = useState<Record<string, number>>({});
   const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const [saveError, setSaveError] = useState("");
+
+  // The value each row's input edits in the current mode.
+  const savedValue = (row: CapacityRow) => (mode === "default" ? row.defaultCapacity : row.capacity);
 
   const load = async (targetDate: string) => {
     setLoadState("loading");
@@ -98,7 +102,7 @@ function CapacitySection({ businessId, reloadKey = 0 }: { businessId: string; re
         params: { date: targetDate },
       });
       setRows(res.data.capacity);
-      setDraft(Object.fromEntries(res.data.capacity.map((r) => [r.slotId, r.capacity])));
+      setDraft(Object.fromEntries(res.data.capacity.map((r) => [r.slotId, mode === "default" ? r.defaultCapacity : r.capacity])));
       setLoadState("loaded");
     } catch {
       setLoadState("error");
@@ -111,7 +115,7 @@ function CapacitySection({ businessId, reloadKey = 0 }: { businessId: string; re
     };
     run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [businessId, date, reloadKey]);
+  }, [businessId, date, reloadKey, mode]);
 
   // Drops this date's override for one timeframe so it uses the default again.
   const resetToDefault = async (slotId: string) => {
@@ -128,16 +132,21 @@ function CapacitySection({ businessId, reloadKey = 0 }: { businessId: string; re
     }
   };
 
-  const isDirty = rows.some((row) => draft[row.slotId] !== row.capacity);
+  const isDirty = rows.some((row) => draft[row.slotId] !== savedValue(row));
 
   const saveAll = async () => {
     if (saveState === "saving") return; // guards against double-submit on repeated clicks
     setSaveState("saving");
     setSaveError("");
     try {
-      const changed = rows.filter((row) => draft[row.slotId] !== row.capacity);
+      const changed = rows.filter((row) => draft[row.slotId] !== savedValue(row));
       for (const row of changed) {
-        await api.put(`/marketplace/vendor/${businessId}/capacity`, { slotId: row.slotId, capacity: draft[row.slotId], date });
+        // No date -> the server updates the recurring default, not an override.
+        await api.put(`/marketplace/vendor/${businessId}/capacity`, {
+          slotId: row.slotId,
+          capacity: draft[row.slotId],
+          ...(mode === "date" ? { date } : {}),
+        });
       }
       await load(date);
       setSaveState("saved");
@@ -159,13 +168,45 @@ function CapacitySection({ businessId, reloadKey = 0 }: { businessId: string; re
     return <p className="text-sm text-gray-500 py-4">Couldn&apos;t load delivery capacity.</p>;
   }
 
+  const modeButton = (value: "default" | "date", label: string) => (
+    <button
+      type="button"
+      aria-pressed={mode === value}
+      disabled={saveState === "saving"}
+      onClick={() => {
+        if (mode === value) return;
+        setSaveError("");
+        setMode(value);
+      }}
+      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition disabled:opacity-50 ${
+        mode === value ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-900"
+      }`}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <div className="space-y-4">
-      <DeliveryDatePicker value={date} onChange={setDate} disabled={saveState === "saving"} />
-      <p className="text-xs text-gray-500">
-        Saving here sets the capacity for <strong>this date only</strong>. Your default for other days is not changed.
-      </p>
-      {rows.length > 0 && rows[0].dateAvailable === false && (
+      <div role="group" aria-label="Capacity to edit" className="inline-flex gap-1 p-1 rounded-xl bg-gray-100">
+        {modeButton("default", "Default for every delivery day")}
+        {modeButton("date", "Change a specific date")}
+      </div>
+
+      {mode === "default" ? (
+        <p className="text-xs text-gray-500">
+          Set these once. They apply to <strong>every day you deliver</strong>, so you don&apos;t have to set them each day.
+          Use &ldquo;Change a specific date&rdquo; only when one day needs a different number.
+        </p>
+      ) : (
+        <>
+          <DeliveryDatePicker value={date} onChange={setDate} disabled={saveState === "saving"} />
+          <p className="text-xs text-gray-500">
+            Saving here sets the capacity for <strong>this date only</strong>. Your default for other days is not changed.
+          </p>
+        </>
+      )}
+      {mode === "date" && rows.length > 0 && rows[0].dateAvailable === false && (
         <p role="status" className="text-xs p-2.5 rounded-lg bg-amber-50 text-amber-800">
           You don&apos;t deliver on this date (see your delivery schedule above), so customers can&apos;t book it whatever the numbers below say.
         </p>
@@ -173,19 +214,23 @@ function CapacitySection({ businessId, reloadKey = 0 }: { businessId: string; re
 
       <div className="space-y-2">
         {rows.map((row) => {
-          const value = draft[row.slotId] ?? row.capacity;
+          const value = draft[row.slotId] ?? savedValue(row);
           const remaining = Math.max(0, value - row.booked);
           return (
             <div key={row.slotId} className="flex flex-wrap items-center gap-3 bg-gray-50 rounded-xl p-3">
               <div className="min-w-[140px]">
                 <p className="font-medium text-gray-900 text-sm">{row.slotLabel}</p>
-                <p className="text-xs text-gray-500">
-                  {row.paid ?? row.booked} paid
-                  {(row.reserved ?? 0) > 0 && ` · ${row.reserved} awaiting payment`} · {remaining} remaining
-                  {row.overrideCapacity === null && <span className="text-gray-500"> · using default ({row.defaultCapacity})</span>}
-                </p>
-                {row.booked > value && <p className="text-xs text-amber-700">Over capacity — existing orders are kept; new bookings are stopped.</p>}
-                {row.overrideCapacity !== null && (
+                {mode === "default" ? (
+                  <p className="text-xs text-gray-500">Every delivery day, unless you change a date</p>
+                ) : (
+                  <p className="text-xs text-gray-500">
+                    {row.paid ?? row.booked} paid
+                    {(row.reserved ?? 0) > 0 && ` · ${row.reserved} awaiting payment`} · {remaining} remaining
+                    {row.overrideCapacity === null && <span className="text-gray-500"> · using default ({row.defaultCapacity})</span>}
+                  </p>
+                )}
+                {mode === "date" && row.booked > value && <p className="text-xs text-amber-700">Over capacity — existing orders are kept; new bookings are stopped.</p>}
+                {mode === "date" && row.overrideCapacity !== null && (
                   <button type="button" disabled={saveState === "saving"} onClick={() => resetToDefault(row.slotId)} className="text-xs font-semibold text-purple-700 hover:text-purple-900 disabled:opacity-50">
                     Use default ({row.defaultCapacity})
                   </button>
@@ -222,7 +267,7 @@ function CapacitySection({ businessId, reloadKey = 0 }: { businessId: string; re
           {saveState === "saving" && <Loader2 size={14} className="animate-spin" />}
           {saveState === "saved" && <CheckCircle2 size={14} />}
           {saveState === "idle" && <Save size={14} />}
-          {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved successfully" : "Save Capacity"}
+          {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved successfully" : mode === "default" ? "Save Default Capacity" : "Save Capacity for This Date"}
         </button>
       )}
     </div>

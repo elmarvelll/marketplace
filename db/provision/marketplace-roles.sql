@@ -113,6 +113,22 @@ DO $$ BEGIN IF to_regclass('marketplace."ScheduledDelivery"') IS NOT NULL THEN
   EXECUTE 'REVOKE ALL ON marketplace."ScheduledDelivery" FROM marketplace_app';
   EXECUTE 'GRANT SELECT, INSERT, UPDATE ON marketplace."ScheduledDelivery" TO marketplace_app';
 END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."DeliveryHandoverCode"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."DeliveryHandoverCode" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT, UPDATE ON marketplace."DeliveryHandoverCode" TO marketplace_app';
+END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."DeliveryCodeSubmission"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."DeliveryCodeSubmission" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT, UPDATE ON marketplace."DeliveryCodeSubmission" TO marketplace_app';
+END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."SlotBriefingNotice"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."SlotBriefingNotice" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT, DELETE ON marketplace."SlotBriefingNotice" TO marketplace_app';
+END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."DeliveryShiftCheckIn"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."DeliveryShiftCheckIn" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT ON marketplace."DeliveryShiftCheckIn" TO marketplace_app';
+END IF; END $$;
 RESET ROLE;
 REVOKE marketplace_migrator FROM CURRENT_USER;
 COMMIT;

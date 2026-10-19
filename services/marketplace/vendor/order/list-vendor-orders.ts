@@ -1,8 +1,9 @@
 // services/marketplace/vendor/order/list-vendor-orders.ts
 //
-// This vendor's own orders (spec §6: vendor just sees the order — no
-// accept/reject controls, unlike list-seller-orders.ts's Business
-// equivalent). Once a deliverer is assigned to collect from this vendor
+// This vendor's own orders, for information only: vendors never accept,
+// reject or mark orders ready (payment confirmation confirms them, and the
+// admin-run delivery operation collects them — unlike list-seller-orders.ts's
+// Business equivalent). Once a deliverer is assigned to collect from this vendor
 // (Delivery_x_businesses — the same handoff record Business's central
 // coordinator used, reused unchanged here per
 // docs/marketplace/decisions/vendor-independent-architecture.md), the
@@ -47,6 +48,8 @@ export async function listVendorOrders(businessId: string) {
             price: true,
             deliveryStatus: true,
             rejectedAt: true,
+            cancelledAt: true,
+            deliveryItem: { select: { delivery: { select: { deliveryman: { select: { firstName: true, lastName: true } } } } } },
             product: { select: { name: true } },
             side: { select: { name: true } },
           },
@@ -90,6 +93,11 @@ export async function listVendorOrders(businessId: string) {
       isDisputed: order.isDisputed,
       bookedFor: order.vendorDeliveryBooking?.bookedFor.toISOString() ?? null,
       slot: order.vendorDeliveryBooking?.slot ?? null,
+      // Who is collecting this order (read-only — set by the admin / roster).
+      delivererName: (() => {
+        const man = order.items.find((i) => i.deliveryItem)?.deliveryItem?.delivery.deliveryman;
+        return man ? `${man.firstName} ${man.lastName}` : null;
+      })(),
       items: order.items.map((item) => ({
         id: item.id,
         productName: item.product?.name ?? item.side?.name ?? "Unknown item",
@@ -97,6 +105,7 @@ export async function listVendorOrders(businessId: string) {
         price: item.price,
         deliveryStatus: item.deliveryStatus,
         rejectedAt: item.rejectedAt?.toISOString() ?? null,
+        refunded: Boolean(item.rejectedAt || item.cancelledAt),
       })),
     })),
     pendingPickups: handoffs.map((h) => ({

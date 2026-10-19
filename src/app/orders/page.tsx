@@ -42,8 +42,13 @@ interface OrderRow {
   deliveryWindow: string | null;
   isDisputed: boolean;
   disputeResolvedAt: string | null;
+  // Vendor Market: the delivery booking this order belongs to, and the
+  // student's handover code for it (shared by every vendor order in it).
+  vendorDelivery?: { reference: string; date: string; slotLabel: string; code: string | null; delivered: boolean } | null;
   items: OrderItemRow[];
 }
+
+const deliveryDayFormatter = new Intl.DateTimeFormat("en-NG", { weekday: "long", month: "short", day: "numeric", timeZone: "UTC" });
 
 function itemStatusLabel(item: OrderItemRow): string {
   if (item.cancelledAt) return "Cancelled";
@@ -87,6 +92,26 @@ function OrderCard({ order, busyId, onDispute }: { order: OrderRow; busyId: stri
           </li>
         ))}
       </ul>
+
+      {order.vendorDelivery && (
+        <div className="mb-3 p-3 rounded-xl bg-purple-50 text-purple-900 text-xs space-y-1">
+          <p>
+            Delivery {deliveryDayFormatter.format(new Date(`${order.vendorDelivery.date}T00:00:00Z`))}, {order.vendorDelivery.slotLabel} · ref #{order.vendorDelivery.reference}
+          </p>
+          {order.vendorDelivery.delivered ? (
+            <p className="font-medium">Delivered.</p>
+          ) : order.vendorDelivery.code ? (
+            <>
+              <p>
+                Your delivery code: <span className="font-mono text-base font-bold tracking-[0.25em]">{order.vendorDelivery.code}</span>
+              </p>
+              <p>Give it to the deliverer only after you&apos;ve received and checked your order. It covers every vendor in this delivery.</p>
+            </>
+          ) : (
+            <p>Your delivery code isn&apos;t available yet — check back shortly or contact support.</p>
+          )}
+        </div>
+      )}
 
       {order.items.some((item) => item.deliveryOtp) && (
         <div className="mt-3 p-3 rounded-xl bg-blue-50 text-blue-800 text-xs">

@@ -27,6 +27,7 @@ export async function requireDeliveryItem(delivererId: string, deliveryItemId: s
           order: {
             select: {
               businessId: true,
+              vendorDeliveryBookingId: true,
               business: { select: { name: true, user: { select: { email: true } } } },
               userId: true,
               user: { select: { email: true } },

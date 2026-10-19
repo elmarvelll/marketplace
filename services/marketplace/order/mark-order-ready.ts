@@ -14,7 +14,7 @@ import { PAID_ORDER } from "@/services/marketplace/order/shared/paid-order";
 
 export async function markOrderReady(businessId: string, orderId: string, actorUserId: string) {
   const order = await prisma.order.findFirst({
-    where: { id: orderId, businessId, ...PAID_ORDER },
+    where: { id: orderId, businessId, ...PAID_ORDER, business: { type: "BUSINESS" } }, // vendors never mark orders ready
     select: {
       id: true,
       status: true,

@@ -6,12 +6,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runController, readJsonBody } from "@/lib/controller-helpers";
 import { badRequest } from "@/lib/service-error";
-import { requireOwnedBusiness } from "@/services/marketplace/business/business-ownership.service";
+import { requireOwnedBusinessOnly } from "@/services/marketplace/business/business-ownership.service";
 import { rejectOrderItem as rejectOrderItemAction } from "@/services/marketplace/order/reject-order-item";
 
 export async function rejectOrderItem(businessId: string, orderId: string, itemId: string, request: NextRequest): Promise<NextResponse> {
   return runController(async () => {
-    const owned = await requireOwnedBusiness(businessId);
+    const owned = await requireOwnedBusinessOnly(businessId);
     const body = await readJsonBody<{ reason?: string }>(request);
     if (!body.reason?.trim()) throw badRequest("A rejection reason is required.");
     await rejectOrderItemAction(owned.businessId, orderId, itemId, owned.session.user.id, body.reason.trim());

@@ -61,8 +61,11 @@ describe("vendor checkout — payment lifecycle", () => {
     assert.equal(notes.length, 1);
     assert.equal(notes[0].link, `/vendor-dashboard/${s.vendor.id}/orders`);
     for (const r of [a, b]) if (r.state === "paid") await deliverEmails(r.emailIds);
-    assert.equal(resend.sent.length, 1);
-    assert.match(resend.sent[0].html, new RegExp(`/vendor-dashboard/${s.vendor.id}/orders`));
+    const ownerMail = resend.sent.filter((m) => m.to === s.owner.email);
+    assert.equal(ownerMail.length, 1);
+    assert.match(ownerMail[0].html, new RegExp(`/vendor-dashboard/${s.vendor.id}/orders`));
+    // The student is sent their delivery code once (vendor-delivery-handover.test.ts covers its content).
+    assert.equal(resend.sent.filter((m) => m.to === s.buyer.email).length, 1);
   });
 
   it("cancel: stock and delivery capacity are both released, exactly once; nothing is sent", async () => {
