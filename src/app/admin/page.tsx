@@ -10,7 +10,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { isAxiosError } from "axios";
-import { AlertCircle, Loader2, Users, Building2, Sparkles, Truck, PackageSearch, PackageCheck, Settings, ClipboardList } from "lucide-react";
+import { AlertCircle, Loader2, Users, Building2, Sparkles, Truck, PackageSearch, PackageCheck, Settings, ClipboardList, CalendarDays } from "lucide-react";
 import api from "@/lib/axios";
 import { SKILLS_ENABLED } from "@/app/_components/marketplace-features";
 
@@ -78,6 +78,16 @@ export default function AdminOverviewPage() {
           <div>
             <p className="text-sm font-medium text-gray-900">Deliverer applications</p>
             <p className="text-xs text-gray-500">Approve, reject, or suspend deliverers.</p>
+          </div>
+        </Link>
+        <Link
+          href="/admin/delivery-roster"
+          className="flex items-center gap-3 bg-white rounded-2xl border border-gray-100 p-4 hover:border-blue-200 transition"
+        >
+          <CalendarDays size={18} className="text-gray-500" />
+          <div>
+            <p className="text-sm font-medium text-gray-900">Delivery roster</p>
+            <p className="text-xs text-gray-500">Weekly deliverer schedule and delivery limits per slot.</p>
           </div>
         </Link>
         <Link

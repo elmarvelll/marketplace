@@ -24,6 +24,9 @@ const TABS = [
   // docs/marketplace/systems/vendor-delivery-system.md. An admin
   // capability/tab, not a new global role (spec §38).
   { href: "/admin/vendor-delivery", label: "Vendor Delivery" },
+  // Recurring weekly delivery roster for both operations — see
+  // services/marketplace/delivery-roster/.
+  { href: "/admin/delivery-roster", label: "Delivery Roster" },
 ];
 
 export default function AdminMainMenu() {

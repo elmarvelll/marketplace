@@ -16,6 +16,7 @@ import { buildPickupOtpExpiry, generateOtp } from "@/lib/otp";
 import { sendEmail, delivererPickupAssignedEmail } from "@/services/marketplace/notifications/email.service";
 import { createNotification } from "@/services/marketplace/notifications/notification.service";
 import { READY_ITEM_WHERE } from "./shared/ready-item-filter";
+import { syncPlansToAssignment } from "@/services/marketplace/delivery-roster/delivery-plans";
 
 export async function assignDelivery(delivererId: string | undefined, orderItemIds: string[] | undefined, adminUserId: string) {
   const cleanDelivererId = delivererId?.trim();
@@ -129,6 +130,11 @@ export async function assignDelivery(delivererId: string | undefined, orderItemI
       });
       createdHandoffs.push({ businessId, businessName: name, pickupOtp, pickupOtpExpiry: pickupOtpExpiry.toISOString() });
     }
+
+    // The delivery roster's plan for these orders now records who actually
+    // has them (delivery-roster/delivery-plans.ts) — the plan is frozen from
+    // here on and the calendar never shows a stale planned deliverer.
+    await syncPlansToAssignment(tx, Array.from(new Set(items.map((item) => item.orderId))), cleanDelivererId, adminUserId);
 
     for (const item of items) {
       await recordOrderEvent(tx, { orderId: item.orderId, orderItemId: item.id, type: "DELIVERER_ASSIGNED", actorType: "admin", actorId: adminUserId });

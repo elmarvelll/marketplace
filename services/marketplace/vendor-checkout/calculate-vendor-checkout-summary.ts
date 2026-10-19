@@ -15,6 +15,10 @@
 // in the cart still has room in it; the numbers shown are the bottleneck
 // vendor's remaining capacity, so the UI's "N spot(s) left" always matches
 // what create-vendor-orders-for-checkout.ts will actually enforce.
+// The Vendor Market delivery roster's operation-wide limit (closed dates,
+// max deliveries per timeframe occurrence — services/marketplace/delivery-roster/)
+// is folded in the same way: when it's the tighter of the two, its numbers
+// are the ones shown.
 
 import { prisma } from "@/lib/prisma";
 import { getVendorCartForUser } from "@/services/marketplace/vendor-cart/get-vendor-cart-for-user";
@@ -25,6 +29,9 @@ import { countVendorBookingsForSlot } from "@/services/marketplace/vendor/capaci
 import { resolveVendorCapacity } from "@/services/marketplace/vendor/capacity/resolve-vendor-capacity";
 import { loadVendorScheduleWindow } from "@/services/marketplace/vendor/capacity/vendor-delivery-schedule";
 import { calculateVendorFees, type VendorFeeBreakdown } from "./shared/vendor-fees";
+import { loadRosterWindow } from "@/services/marketplace/delivery-roster/roster-resolution";
+import { loadOccurrenceUsage, usageKey, usedOf } from "@/services/marketplace/delivery-roster/roster-capacity";
+import { addDays } from "@/services/marketplace/delivery-roster/shared/roster-calendar";
 import type { VendorCartLineItem } from "@/types/vendor-cart";
 
 export interface VendorSlotAvailability {
@@ -79,21 +86,46 @@ export async function calculateVendorCheckoutSummary(userId: string, dateStr?: s
   const slotRows = await prisma.vendorDeliverySlot.findMany({ where: { active: true }, orderBy: { windowStart: "asc" } });
   const businessIds = Array.from(new Set(items.map((item) => item.businessId)));
 
+  // The roster limit for every timeframe on every date in the booking
+  // window — batched, a fixed number of queries.
+  const now = new Date();
+  const windowStart = schoolToday(now);
+  const windowDays = MAX_ADVANCE_BOOKING_DAYS + 1;
+  const [roster, rosterUsage] = await Promise.all([
+    loadRosterWindow("VENDOR", windowStart, windowDays),
+    loadOccurrenceUsage("VENDOR", windowStart, addDays(windowStart, windowDays - 1), undefined, { now }),
+  ]);
+  const rosterRoom = (slotId: string, date: Date) => {
+    const occurrence = roster.occurrence(slotId, date);
+    const booked = usedOf(rosterUsage.get(usageKey(slotId, date)));
+    const remaining = occurrence.limit === null ? Infinity : occurrence.limit - booked;
+    return { limit: occurrence.limit, booked, remaining };
+  };
+
   const slots: VendorSlotAvailability[] = await Promise.all(
     slotRows.map(async (slot) => {
+      const room = rosterRoom(slot.id, bookedFor);
       if (businessIds.length === 0) {
-        // Nothing in the cart yet to check capacity for — bookability is
-        // purely the time cutoff; capacity/booked are meaningless until a
-        // vendor is actually selected.
-        return { id: slot.id, label: slot.label, windowStart: slot.windowStart, windowEnd: slot.windowEnd, capacity: 0, booked: 0, bookable: isSlotBookable(slot, new Date(), bookedFor) };
+        // Nothing in the cart yet to check vendor capacity for — bookability
+        // is the time cutoff and the roster limit; vendor capacity numbers
+        // are meaningless until a vendor is actually selected.
+        return {
+          id: slot.id,
+          label: slot.label,
+          windowStart: slot.windowStart,
+          windowEnd: slot.windowEnd,
+          capacity: room.limit ?? 0,
+          booked: room.limit === null ? 0 : room.booked,
+          bookable: room.remaining > 0 && isSlotBookable(slot, new Date(), bookedFor),
+        };
       }
 
       // The bottleneck vendor determines both the displayed numbers and
       // overall bookability — matches create-vendor-orders-for-checkout.ts's
-      // per-vendor gate exactly.
-      let minRemaining = Infinity;
-      let bottleneckCapacity = 0;
-      let bottleneckBooked = 0;
+      // per-vendor gate exactly — unless the roster limit is tighter still.
+      let minRemaining = room.remaining;
+      let bottleneckCapacity = room.limit ?? 0;
+      let bottleneckBooked = room.booked;
       for (const businessId of businessIds) {
         const capacity = await resolveVendorCapacity(businessId, slot.id, bookedFor);
         const booked = await countVendorBookingsForSlot(businessId, slot.id, bookedFor);
@@ -119,12 +151,14 @@ export async function calculateVendorCheckoutSummary(userId: string, dateStr?: s
 
   // Which dates in the booking window are worth offering. Batched (a fixed
   // number of queries for the whole window) — see loadVendorScheduleWindow.
-  const now = new Date();
-  const window = await loadVendorScheduleWindow(businessIds, schoolToday(now), MAX_ADVANCE_BOOKING_DAYS + 1, now);
+  const window = await loadVendorScheduleWindow(businessIds, windowStart, windowDays, now);
   const dates: VendorDateAvailability[] = window.dates.map((date) => {
     const iso = date.toISOString().slice(0, 10);
-    const openSlots = slotRows.filter((slot) => isSlotBookable(slot, now, date));
-    if (openSlots.length === 0) return { date: iso, selectable: false, reason: "closed_for_today" };
+    const timeOpen = slotRows.filter((slot) => isSlotBookable(slot, now, date));
+    if (timeOpen.length === 0) return { date: iso, selectable: false, reason: "closed_for_today" };
+    // Closed or full on the delivery roster counts as fully booked for the buyer.
+    const openSlots = timeOpen.filter((slot) => rosterRoom(slot.id, date).remaining > 0);
+    if (openSlots.length === 0) return { date: iso, selectable: false, reason: "fully_booked" };
     if (businessIds.length === 0) return { date: iso, selectable: true, reason: "ok" };
     const days = businessIds.map((businessId) => window.day(businessId, date));
     if (days.some((d) => !d.available)) return { date: iso, selectable: false, reason: "not_delivering" };

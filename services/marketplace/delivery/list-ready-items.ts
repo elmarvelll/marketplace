@@ -6,6 +6,9 @@
 
 import { prisma } from "@/lib/prisma";
 import { READY_ITEM_WHERE } from "./shared/ready-item-filter";
+import { plansForOrders } from "@/services/marketplace/delivery-roster/delivery-plans";
+import { loadDeliverers } from "@/services/marketplace/delivery-roster/roster-resolution";
+import { listRosterSlots } from "@/services/marketplace/delivery-roster/roster-slots";
 
 export async function listReadyItems() {
   const items = await prisma.orderItem.findMany({
@@ -33,14 +36,28 @@ export async function listReadyItems() {
           // Vendor orders carry their delivery date+timeframe via the
           // booking — used to group the assignment pool by order (spec
           // §21-22), never available for a Business item (null).
-          vendorDeliveryBooking: { select: { bookedFor: true, slot: { select: { id: true, label: true } } } },
+          vendorDeliveryBookingId: true,
+          vendorDeliveryBooking: { select: { bookedFor: true, slotId: true, slot: { select: { id: true, label: true } } } },
         },
       },
     },
     orderBy: { order: { sellerDroppedOffAt: "asc" } },
   });
 
+  // The delivery roster's plan for each order (who should take it, and — for
+  // a Business order booked into a central slot — which slot). A suggestion
+  // only: the coordinator still assigns through assign-delivery.ts.
+  const uniqueOrders = Array.from(new Map(items.map((item) => [item.order.id, item.order])).values());
+  const plans = await plansForOrders(
+    uniqueOrders.map((o) => ({ id: o.id, vendorDeliveryBookingId: o.vendorDeliveryBookingId, booking: o.vendorDeliveryBooking ? { slotId: o.vendorDeliveryBooking.slotId, bookedFor: o.vendorDeliveryBooking.bookedFor } : null }))
+  );
+  const planned = await loadDeliverers(Array.from(plans.values()).map((p) => p.delivererId).filter(Boolean) as string[]);
+  const centralSlots = new Map((await listRosterSlots("MARKETPLACE", undefined, { includeInactive: true })).map((slot) => [slot.id, slot]));
+
   return items.map((item) => {
+    const plan = plans.get(item.order.id);
+    const plannedPerson = plan?.delivererId ? planned.get(plan.delivererId) : undefined;
+    const centralSlot = !item.order.vendorDeliveryBooking && plan ? centralSlots.get(plan.slotId) : undefined;
     // Either a Product line or a School Vendor Side line — both belong to
     // exactly one business.
     const source = (item.product ?? item.side)!;
@@ -61,8 +78,11 @@ export async function listReadyItems() {
       collectionLocation: source.business.type === "SCHOOL_VENDOR" ? source.business.location : null,
       sellerDroppedOffAt: item.order.sellerDroppedOffAt?.toISOString() ?? null,
       estimatedDeliveryAt: item.order.estimatedDeliveryAt?.toISOString() ?? null,
-      bookedFor: item.order.vendorDeliveryBooking?.bookedFor.toISOString() ?? null,
-      slot: item.order.vendorDeliveryBooking?.slot ?? null,
+      // A central (Business) order booked into a roster slot carries its
+      // slot occurrence too, in the same shape as a vendor booking's.
+      bookedFor: item.order.vendorDeliveryBooking?.bookedFor.toISOString() ?? (centralSlot ? `${plan!.date}T00:00:00.000Z` : null),
+      slot: item.order.vendorDeliveryBooking?.slot ?? (centralSlot ? { id: centralSlot.id, label: centralSlot.label } : null),
+      plannedDeliverer: plannedPerson ? { id: plannedPerson.id, name: plannedPerson.name, approved: plannedPerson.status === "APPROVED", source: plan!.source } : null,
     };
   });
 }

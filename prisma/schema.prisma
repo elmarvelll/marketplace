@@ -1616,3 +1616,136 @@ model MarketplaceInstance {
 
   @@schema("marketplace")
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Recurring delivery rosters (services/marketplace/delivery-roster/). Marketplace-owned because AkadVerse's tables can't
+// be changed from here. A slotId is a public."VendorDeliverySlot".id (VENDOR) or a CentralDeliverySlot.id
+// (MARKETPLACE); delivererId / orderId / bookingId are public ids. None of them is a foreign key (the roles hold no
+// REFERENCES on those tables), so every write validates them in the service layer.
+// ---------------------------------------------------------------------------------------------------------------------
+
+// The two delivery operations a roster can belong to. MARKETPLACE = Business orders, collected at the central drop-off
+// point; VENDOR = School Vendor orders, collected from each vendor (VendorDeliverySlot timeframes).
+enum DeliveryOperation {
+  MARKETPLACE
+  VENDOR
+
+  @@schema("marketplace")
+}
+
+// How a ScheduledDelivery got its planned deliverer: resolved from the roster (may be re-planned when the roster
+// changes, but only after an admin chooses to), or set by an admin (never changed automatically).
+enum DeliveryPlanSource {
+  ROSTER
+  MANUAL
+
+  @@schema("marketplace")
+}
+
+// One row per operation: the default maximum deliveries per slot occurrence. Null = no limit (how both operations
+// behaved before rosters existed).
+model DeliveryRosterSettings {
+  operation            DeliveryOperation @id
+  defaultMaxDeliveries Int?
+  updatedAt            DateTime          @updatedAt
+  updatedBy            String?
+
+  @@schema("marketplace")
+}
+
+// Time slots for the central Marketplace delivery operation (the Vendor operation uses public."VendorDeliverySlot").
+// While no active row exists, Business checkout schedules exactly as before (estimated date only, no slot).
+model CentralDeliverySlot {
+  id             String   @id @default(uuid())
+  label          String
+  // "HH:MM", 24-hour, school timezone — same convention as VendorDeliverySlot.
+  windowStart    String
+  windowEnd      String
+  // Deliverer positions (staffing), the equivalent of VendorDeliverySlot.delivererCapacity. Not a delivery limit.
+  staffPositions Int      @default(1)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([active])
+  @@schema("marketplace")
+}
+
+// The recurring template's per-cell delivery limit: max deliveries for every occurrence of (slot, weekday).
+// Null = use DeliveryRosterSettings.defaultMaxDeliveries. weekday is ISO: 1 = Monday ... 7 = Sunday.
+model RosterSlotDay {
+  id            String            @id @default(uuid())
+  operation     DeliveryOperation
+  slotId        String
+  weekday       Int
+  maxDeliveries Int?
+  updatedAt     DateTime          @updatedAt
+  updatedBy     String?
+
+  @@unique([operation, slotId, weekday])
+  @@schema("marketplace")
+}
+
+// The recurring template's staffing: this deliverer works this slot on this weekday, every week, until removed.
+// A template only — it is never itself an order assignment (see ScheduledDelivery).
+model RosterAssignment {
+  id          String            @id @default(uuid())
+  operation   DeliveryOperation
+  slotId      String
+  weekday     Int
+  delivererId String
+  createdBy   String
+  createdAt   DateTime          @default(now())
+
+  @@unique([operation, slotId, weekday, delivererId])
+  @@index([delivererId])
+  @@schema("marketplace")
+}
+
+// A date-specific override of the template for one slot occurrence. Never changes the template.
+//   closed            -> no deliveries may be booked into that occurrence;
+//   maxDeliveries     -> that occurrence's limit (null = the template's);
+//   replaceDeliverers -> the occurrence is staffed by exactly delivererIds (possibly nobody) instead of the template.
+model RosterException {
+  id                String            @id @default(uuid())
+  operation         DeliveryOperation
+  slotId            String
+  date              DateTime          @db.Date
+  closed            Boolean           @default(false)
+  maxDeliveries     Int?
+  replaceDeliverers Boolean           @default(false)
+  delivererIds      String[]
+  note              String?
+  createdBy         String
+  updatedBy         String
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@unique([operation, slotId, date])
+  @@index([operation, date])
+  @@schema("marketplace")
+}
+
+// One delivery's own slot occurrence and planned deliverer, kept apart from the template. MARKETPLACE: one row per
+// Business Order (orderId) — the order's slot lives only here. VENDOR: one row per VendorDeliveryBooking (bookingId),
+// whose slotId/bookedFor are authoritative and never change; slotId/date here are copied for lookups.
+// The ACTUAL assignment is still the existing Delivery/DeliveryItem (assign-delivery.ts); this is the plan it starts
+// from. Rows are never deleted: whether a delivery still takes up capacity is derived from its order's live state.
+model ScheduledDelivery {
+  id                 String             @id @default(uuid())
+  operation          DeliveryOperation
+  orderId            String?            @unique
+  bookingId          String?            @unique
+  slotId             String
+  date               DateTime           @db.Date
+  plannedDelivererId String?
+  planSource         DeliveryPlanSource @default(ROSTER)
+  plannedBy          String?
+  plannedAt          DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@index([operation, slotId, date])
+  @@index([plannedDelivererId])
+  @@schema("marketplace")
+}

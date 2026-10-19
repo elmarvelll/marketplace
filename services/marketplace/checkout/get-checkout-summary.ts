@@ -9,6 +9,14 @@ import { prisma } from "@/lib/prisma";
 import { getCartForUser } from "@/services/marketplace/cart/get-cart-for-user";
 import { getEstimatedDeliveryForBusiness, formatEstimatedDelivery } from "@/services/marketplace/delivery/estimated-delivery.service";
 import { SERVICE_FEE_RATE } from "./shared/service-fee";
+import { findCentralSlot } from "@/services/marketplace/delivery-roster/central-scheduling";
+import { formatSlotDate } from "@/services/marketplace/delivery-roster/shared/roster-calendar";
+
+// "17:30" -> "5:30 PM" (slot windows are school-timezone wall-clock times).
+function formatClock(hhmm: string): string {
+  const [hour, minute] = hhmm.split(":").map(Number);
+  return `${hour % 12 || 12}:${String(minute).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
+}
 
 export interface CheckoutSummaryItem {
   id: string;
@@ -45,13 +53,26 @@ export async function getCheckoutSummary(userId: string): Promise<CheckoutSummar
   // with the same reusable function checkout/initialize and the product
   // profile use.
   const businessIds = Array.from(new Set(cartItems.map((item) => item.businessId)));
+  // With central delivery slots configured, the estimate is the slot
+  // occurrence checkout will most likely book (central-scheduling.ts — the
+  // same search, without its lock); checkout/initialize re-runs it as the
+  // authoritative step. Without central slots: the existing estimate.
   const estimatesByBusiness = new Map(
-    await Promise.all(businessIds.map(async (businessId) => [businessId, await getEstimatedDeliveryForBusiness(businessId)] as const))
+    await Promise.all(
+      businessIds.map(async (businessId) => {
+        const central = await findCentralSlot(businessId);
+        if (central === "full") return [businessId, { date: "No delivery slot available", window: "Central delivery is fully booked — try again later" }] as const;
+        if (central) {
+          return [businessId, { date: formatSlotDate(central.date), window: `${formatClock(central.slot.windowStart)} - ${formatClock(central.slot.windowEnd)}` }] as const;
+        }
+        return [businessId, formatEstimatedDelivery(await getEstimatedDeliveryForBusiness(businessId))] as const;
+      })
+    )
   );
 
   return {
     items: cartItems.map((item) => {
-      const { date, window } = formatEstimatedDelivery(estimatesByBusiness.get(item.businessId)!);
+      const { date, window } = estimatesByBusiness.get(item.businessId)!;
       return {
         id: item.id,
         productName: item.productName,

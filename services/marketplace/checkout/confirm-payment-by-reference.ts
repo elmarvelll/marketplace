@@ -38,6 +38,8 @@ import { ORDER_PAYMENT_STATUS } from "@/services/marketplace/order/shared/paid-o
 import { resolveVendorCapacity } from "@/services/marketplace/vendor/capacity/resolve-vendor-capacity";
 import { countVendorBookingsForSlot } from "@/services/marketplace/vendor/capacity/manage-vendor-capacity";
 import { reserveLine } from "./shared/stock-reservation";
+import { resolveOccurrence } from "@/services/marketplace/delivery-roster/roster-resolution";
+import { countReservedDeliveries, lockRosterOperation } from "@/services/marketplace/delivery-roster/roster-capacity";
 import { logPayment } from "./shared/payment-log";
 import { enqueueOrderPaidEmails, createOrderPaidNotifications } from "./notify-order-paid";
 
@@ -137,6 +139,18 @@ async function finalizeAfterRelease(payment: CheckoutPayment, verified: Verified
             const used = await countVendorBookingsForSlot(order.businessId, slotId, bookedFor, tx, { excludeReference: payment.reference });
             if (used >= capacity) throw new ReReserveError("the vendor's delivery slot is now fully booked");
           }
+          // The Vendor Market roster limit for the booking's timeframe/date.
+          const booking = orders.find((o) => o.vendorDeliveryBooking)?.vendorDeliveryBooking;
+          if (booking) await assertRosterRoom(tx, "VENDOR", booking.slotId, booking.bookedFor, payment.reference);
+        } else {
+          // Central delivery slot occurrences this checkout's orders were booked into (none when central slots aren't
+          // in use). Locked like checkout itself, so a concurrent checkout can't take the same last place.
+          const scheduled = await tx.scheduledDelivery.findMany({
+            where: { operation: "MARKETPLACE", orderId: { in: (await tx.order.findMany({ where: { paystackReference: payment.reference }, select: { id: true } })).map((o) => o.id) } },
+            select: { slotId: true, date: true },
+          });
+          if (scheduled.length > 0) await lockRosterOperation(tx, "MARKETPLACE");
+          for (const s of scheduled) await assertRosterRoom(tx, "MARKETPLACE", s.slotId, s.date, payment.reference);
         }
 
         return markOrdersPaid(tx, payment, now);
@@ -157,6 +171,16 @@ async function finalizeAfterRelease(payment: CheckoutPayment, verified: Verified
     }
     throw err;
   }
+}
+
+// Re-reserving a released checkout: its delivery must still fit the roster's limit for that occurrence (counting
+// everyone else, not this checkout itself).
+async function assertRosterRoom(tx: Db, operation: "VENDOR" | "MARKETPLACE", slotId: string, date: Date, reference: string) {
+  const occurrence = await resolveOccurrence(operation, slotId, date, tx);
+  if (occurrence.closed) throw new ReReserveError("its delivery slot has since been closed for that date");
+  if (occurrence.limit === null) return;
+  const used = await countReservedDeliveries(operation, slotId, date, tx, { excludeReference: reference });
+  if (used >= occurrence.limit) throw new ReReserveError("its delivery slot is now fully booked");
 }
 
 // Shared by both finalize paths, inside their transaction.

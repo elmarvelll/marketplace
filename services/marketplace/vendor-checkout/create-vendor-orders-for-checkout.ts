@@ -25,6 +25,14 @@
 // deliverer-roster system (DelivererRosterAssignment), a completely
 // separate concern that must never gate a customer's booking. See
 // docs/marketplace/decisions/vendor-independent-architecture.md.
+//
+// Delivery roster limit: separately, the Vendor Market delivery roster
+// (services/marketplace/delivery-roster/) may cap how many DELIVERIES (one
+// per booking) a timeframe takes on a date, or close it for a date. That is
+// an operation-wide limit an admin sets — not deliverer positions — and it
+// is checked here, in the same Serializable transaction, on top of each
+// vendor's own capacity. Unset (the default), it changes nothing. The
+// booking's ScheduledDelivery row records the roster's planned deliverer.
 
 import { randomUUID } from "crypto";
 import { Prisma } from "@prisma/client";
@@ -40,6 +48,9 @@ import { countVendorBookingsForSlot } from "@/services/marketplace/vendor/capaci
 import { EmptyCartError } from "@/services/marketplace/checkout/shared/empty-cart-error";
 import { reserveLine } from "@/services/marketplace/checkout/shared/stock-reservation";
 import { CHECKOUT_CURRENCY, reservationExpiry, toKobo } from "@/services/marketplace/checkout/shared/checkout-payment-config";
+import { resolveOccurrence } from "@/services/marketplace/delivery-roster/roster-resolution";
+import { countReservedDeliveries } from "@/services/marketplace/delivery-roster/roster-capacity";
+import { createScheduledDelivery } from "@/services/marketplace/delivery-roster/delivery-plans";
 
 export { EmptyCartError };
 
@@ -86,6 +97,15 @@ export async function createVendorOrdersForCheckout(userId: string, params: { sl
         const slot = await tx.vendorDeliverySlot.findUnique({ where: { id: slotId } });
         if (!slot || !slot.active) throw conflict("Selected delivery slot is not available.");
         if (!isSlotBookable(slot, new Date(), bookedFor)) throw conflict("This delivery slot can no longer be booked — please pick another.");
+
+        // The Vendor Market delivery roster's own limit for this occurrence
+        // (see the header) — closed dates and a full delivery limit refuse
+        // the booking before anything is reserved.
+        const occurrence = await resolveOccurrence("VENDOR", slot.id, bookedFor, tx);
+        if (occurrence.closed) throw conflict("This delivery time isn't available on that date — please pick another.");
+        if (occurrence.limit !== null && (await countReservedDeliveries("VENDOR", slot.id, bookedFor, tx)) >= occurrence.limit) {
+          throw conflict("This delivery time is fully booked for that date — please pick another.");
+        }
 
         // Note: slot.delivererCapacity is NOT checked here — it's the
         // admin-configured deliverer-roster capacity (a completely
@@ -220,6 +240,8 @@ export async function createVendorOrdersForCheckout(userId: string, params: { sl
         const booking = await tx.vendorDeliveryBooking.create({
           data: { userId, slotId: slot.id, paystackReference: reference, deliveryFee: fees.deliveryFee, serviceFee: fees.serviceFee, status: "PENDING_PAYMENT", bookedFor },
         });
+
+        await createScheduledDelivery(tx, { operation: "VENDOR", bookingId: booking.id, slotId: slot.id, date: bookedFor, staff: occurrence.staff });
 
         const orders = [];
         for (const [businessId, items] of byBusiness) {

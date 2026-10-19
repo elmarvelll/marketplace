@@ -89,6 +89,30 @@ DO $$ BEGIN IF to_regclass('marketplace."MarketplaceInstance"') IS NOT NULL THEN
   EXECUTE 'REVOKE ALL ON marketplace."MarketplaceInstance" FROM marketplace_app';
   EXECUTE 'GRANT SELECT ON marketplace."MarketplaceInstance" TO marketplace_app';
 END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."DeliveryRosterSettings"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."DeliveryRosterSettings" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT, UPDATE ON marketplace."DeliveryRosterSettings" TO marketplace_app';
+END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."CentralDeliverySlot"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."CentralDeliverySlot" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT, UPDATE ON marketplace."CentralDeliverySlot" TO marketplace_app';
+END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."RosterSlotDay"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."RosterSlotDay" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON marketplace."RosterSlotDay" TO marketplace_app';
+END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."RosterAssignment"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."RosterAssignment" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT, DELETE ON marketplace."RosterAssignment" TO marketplace_app';
+END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."RosterException"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."RosterException" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON marketplace."RosterException" TO marketplace_app';
+END IF; END $$;
+DO $$ BEGIN IF to_regclass('marketplace."ScheduledDelivery"') IS NOT NULL THEN
+  EXECUTE 'REVOKE ALL ON marketplace."ScheduledDelivery" FROM marketplace_app';
+  EXECUTE 'GRANT SELECT, INSERT, UPDATE ON marketplace."ScheduledDelivery" TO marketplace_app';
+END IF; END $$;
 RESET ROLE;
 REVOKE marketplace_migrator FROM CURRENT_USER;
 COMMIT;

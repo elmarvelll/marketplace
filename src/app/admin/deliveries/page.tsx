@@ -5,7 +5,9 @@
 // business/vendor (and its collection location for a School Vendor item —
 // spec §23), the customer, and every line item, with one checkbox
 // selecting the whole order at once. Approved deliverers on the other
-// side — pick one, assign. Chrome (navbar + admin tab menu) comes from
+// side — pick one, assign; or "Assign as planned", which sends each selected
+// order to the deliverer the Delivery Roster planned for it (through the same
+// assign-delivery.ts). Chrome (navbar + admin tab menu) comes from
 // ../layout.tsx. See docs/marketplace/systems/delivery-coordinator-system.md.
 
 "use client";
@@ -28,6 +30,8 @@ interface ReadyItem {
   sellerDroppedOffAt: string | null;
   bookedFor: string | null;
   slot: { id: string; label: string } | null;
+  // From the Delivery Roster: who this order's delivery is planned for.
+  plannedDeliverer: { id: string; name: string; approved: boolean; source: "ROSTER" | "MANUAL" | "SUGGESTED" } | null;
 }
 
 interface DelivererRow {
@@ -114,6 +118,28 @@ export default function AdminDeliveriesPage() {
     setSelectedItemIds((current) =>
       allSelected ? current.filter((id) => !ids.includes(id)) : Array.from(new Set([...current, ...ids]))
     );
+  };
+
+  const assignPlanned = async () => {
+    if (selectedItemIds.length === 0) return;
+    setAssigning(true);
+    setMessage("");
+    try {
+      const res = await api.post<{ assigned: { delivererName: string; itemCount: number; handoffs: AssignedHandoff[] }[]; skipped: { orderItemId: string; reason: string }[] }>(
+        "/marketplace/admin/deliveries/assign-planned",
+        { orderItemIds: selectedItemIds }
+      );
+      const done = res.data.assigned.map((a) => `${a.itemCount} to ${a.delivererName}`).join(", ");
+      const skipped = res.data.skipped.length ? ` ${res.data.skipped.length} item(s) skipped: ${Array.from(new Set(res.data.skipped.map((x) => x.reason))).join(" ")}` : "";
+      setMessage(`${done ? `Assigned ${done}.` : "Nothing assigned."}${skipped}`);
+      setLastHandoffs(res.data.assigned.flatMap((a) => a.handoffs));
+      setSelectedItemIds([]);
+      await load();
+    } catch (err) {
+      setMessage((isAxiosError<{ error?: string }>(err) && err.response?.data?.error) || "Assignment failed.");
+    } finally {
+      setAssigning(false);
+    }
   };
 
   const assign = async () => {
@@ -211,6 +237,17 @@ export default function AdminDeliveriesPage() {
                             <span className="text-xs text-gray-500">Order #{orderId.slice(0, 8)}</span>
                           </div>
                           <p className="text-xs text-gray-500 mt-0.5">Customer: {first.customerName}</p>
+                          <p className="text-xs mt-0.5">
+                            {first.plannedDeliverer ? (
+                              <span className={first.plannedDeliverer.approved ? "text-blue-700" : "text-red-700"}>
+                                Planned: {first.plannedDeliverer.name}
+                                {first.plannedDeliverer.source === "SUGGESTED" ? " (roster suggestion)" : first.plannedDeliverer.source === "MANUAL" ? " (set by admin)" : " (roster)"}
+                                {!first.plannedDeliverer.approved && " — no longer approved"}
+                              </span>
+                            ) : (
+                              <span className="text-gray-500">No deliverer planned</span>
+                            )}
+                          </p>
                           {first.collectionLocation && (
                             <p className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
                               <MapPin size={11} /> Collect at: {first.collectionLocation}
@@ -252,6 +289,14 @@ export default function AdminDeliveriesPage() {
               className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition disabled:opacity-50"
             >
               {assigning ? "Assigning…" : `Assign ${selectedItemIds.length || ""} item(s)`}
+            </button>
+            <button
+              type="button"
+              disabled={assigning || selectedItemIds.length === 0}
+              onClick={assignPlanned}
+              className="px-5 py-2.5 rounded-xl border border-blue-600 text-blue-700 hover:bg-blue-50 text-sm font-semibold transition disabled:opacity-50"
+            >
+              Assign as planned
             </button>
             {message && <span className="text-sm text-gray-500">{message}</span>}
           </div>

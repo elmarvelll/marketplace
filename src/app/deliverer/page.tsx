@@ -34,6 +34,8 @@ interface Handoff {
 // docs/marketplace/decisions/vendor-independent-architecture.md.
 interface RosterEntry {
   id: string;
+  // Which delivery operation the shift is for (weekly roster or date-only).
+  operation?: "MARKETPLACE" | "VENDOR";
   date: string;
   status: string;
   slotLabel: string;
@@ -183,8 +185,11 @@ export default function DelivererDashboardPage() {
                 <div key={r.id} className="bg-white rounded-2xl border border-gray-100 p-4 flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="font-medium text-gray-900">
-                      {new Date(r.date).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })} · {r.slotLabel}
+                      {new Date(r.date).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", timeZone: "UTC" })} · {r.slotLabel}
                     </p>
+                    {r.operation && (
+                      <p className="text-xs font-medium text-blue-700">{r.operation === "MARKETPLACE" ? "Marketplace deliveries" : "Vendor deliveries"}</p>
+                    )}
                     <p className="text-xs text-gray-500">
                       Delivery window {r.windowStart}–{r.windowEnd} · Arrive by {r.requiredArrivalTime} ({r.arrivalLeadMins} min early)
                     </p>

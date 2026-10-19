@@ -49,6 +49,12 @@
   "marketplace": {
     "AccountState": { "why": "Marketplace-only blocks and session revocation.", "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"] },
     "AuthThrottle": { "why": "Sign-in attempt limiting.", "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"] },
-    "MarketplaceInstance": { "why": "Database identity marker (read-only to the app).", "privileges": ["SELECT"] }
+    "MarketplaceInstance": { "why": "Database identity marker (read-only to the app).", "privileges": ["SELECT"] },
+    "DeliveryRosterSettings": { "why": "Default max deliveries per slot occurrence, per delivery operation (upserted).", "privileges": ["SELECT", "INSERT", "UPDATE"] },
+    "CentralDeliverySlot": { "why": "Time slots of the central Marketplace delivery operation (admin-managed; deactivated, never deleted).", "privileges": ["SELECT", "INSERT", "UPDATE"] },
+    "RosterSlotDay": { "why": "Recurring per-weekday delivery limit of a slot (upserted; removed when reset to the default).", "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"] },
+    "RosterAssignment": { "why": "Recurring weekly deliverer assignments (added/removed by an admin).", "privileges": ["SELECT", "INSERT", "DELETE"] },
+    "RosterException": { "why": "Date-specific roster overrides (set and restored by an admin).", "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"] },
+    "ScheduledDelivery": { "why": "Per-order slot occurrence and planned deliverer (history kept, never deleted).", "privileges": ["SELECT", "INSERT", "UPDATE"] }
   }
 }

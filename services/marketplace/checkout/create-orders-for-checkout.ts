@@ -19,6 +19,14 @@
 // (release-checkout-reservation.ts). The amount the buyer must pay is
 // computed here from database prices and stored on that row — verification
 // later compares Paystack's reported amount against it.
+//
+// Central delivery slots (services/marketplace/delivery-roster/): when the
+// admin has configured any, each order is also booked into a slot occurrence
+// with room under its delivery limit (central-scheduling.ts), its estimated
+// delivery becomes that slot's real window, and a ScheduledDelivery row
+// records the slot and the roster's planned deliverer. lockRosterOperation
+// serializes that step across concurrent checkouts so a limit can't be
+// exceeded. With no central slots configured, nothing here changes.
 
 import { randomUUID } from "crypto";
 import { prisma } from "@/lib/prisma";
@@ -29,6 +37,9 @@ import { SERVICE_FEE_RATE } from "./shared/service-fee";
 import { EmptyCartError } from "./shared/empty-cart-error";
 import { reserveLine } from "./shared/stock-reservation";
 import { CHECKOUT_CURRENCY, reservationExpiry, toKobo } from "./shared/checkout-payment-config";
+import { centralFullMessage, findCentralSlot } from "@/services/marketplace/delivery-roster/central-scheduling";
+import { lockRosterOperation } from "@/services/marketplace/delivery-roster/roster-capacity";
+import { createScheduledDelivery } from "@/services/marketplace/delivery-roster/delivery-plans";
 
 export { EmptyCartError };
 
@@ -59,6 +70,10 @@ export async function createOrdersForCheckout(userId: string, location: string) 
 
   const orders = await prisma.$transaction(async (tx) => {
     const created = [];
+    // Only when central slots are in use (see the header); taken before any
+    // capacity is counted, so the count below sees every earlier booking.
+    const centralInUse = (await tx.centralDeliverySlot.count({ where: { active: true } })) > 0;
+    if (centralInUse) await lockRosterOperation(tx, "MARKETPLACE");
 
     for (const [businessId, items] of byBusiness) {
       // A business already in the buyer's cart could have been rejected
@@ -91,7 +106,13 @@ export async function createOrdersForCheckout(userId: string, location: string) 
         }
       }
 
-      const estimate = estimates.get(businessId)!;
+      // A central slot occurrence with room — counted inside this
+      // transaction, so an earlier business in this same cart is included.
+      const central = centralInUse ? await findCentralSlot(businessId, tx) : null;
+      if (central === "full") throw conflict(centralFullMessage(items[0].sellerName));
+      const estimate = central
+        ? { estimatedDeliveryAt: central.windowStartAt, deliveryWindowStart: central.windowStartAt, deliveryWindowEnd: central.windowEndAt }
+        : estimates.get(businessId)!;
       const order = await tx.order.create({
         data: {
           userId,
@@ -116,6 +137,9 @@ export async function createOrdersForCheckout(userId: string, location: string) 
           },
         },
       });
+      if (central) {
+        await createScheduledDelivery(tx, { operation: "MARKETPLACE", orderId: order.id, slotId: central.slot.id, date: central.date, staff: central.occurrence.staff });
+      }
       created.push(order);
     }
 
