@@ -14,6 +14,7 @@ import { CheckCircle2, Loader2 } from "lucide-react";
 import DashboardNavbar from "@/app/components/dashboard/student/DashboardNavbar";
 import api from "@/lib/axios";
 import MarketplacePageShell from "@/app/_components/MarketplacePageShell";
+import BankDetailsFields, { type BankDetailsValue } from "@/app/business/_components/BankDetailsFields";
 
 type SubmitState = "idle" | "submitting" | "success" | "error";
 type OtpState = "not_requested" | "sending" | "sent" | "verifying" | "verified" | "error";
@@ -29,6 +30,9 @@ interface VendorSlot {
 export default function ApplyDelivererPage() {
   const [form, setForm] = useState({ firstName: "", lastName: "", email: "", phone: "", hall: "", room: "" });
   const [status, setStatus] = useState<SubmitState>("idle");
+  // Where deliverer payouts are sent. The holder name shown is Paystack's; the server resolves it again.
+  const [bank, setBank] = useState<BankDetailsValue>({});
+  const bankReady = Boolean(bank.bankCode && bank.accountNumber && bank.accountHolderName);
   const [error, setError] = useState("");
 
   // Student-email OTP step — must complete before the form below can be
@@ -78,7 +82,13 @@ export default function ApplyDelivererPage() {
     setStatus("submitting");
     setError("");
     try {
-      await api.post("/marketplace/deliverer/apply", { ...form, preferredAvailability: preferredSlotIds });
+      await api.post("/marketplace/deliverer/apply", {
+        ...form,
+        preferredAvailability: preferredSlotIds,
+        bankName: bank.bankName,
+        bankCode: bank.bankCode,
+        accountNumber: bank.accountNumber,
+      });
       setStatus("success");
     } catch (err) {
       const message = (isAxiosError<{ error?: string }>(err) && err.response?.data?.error) || "Couldn't submit your application.";
@@ -285,16 +295,22 @@ export default function ApplyDelivererPage() {
             </div>
           )}
 
+          <div>
+            <p className="text-sm font-medium text-gray-900 mb-1">Payout account</p>
+            <p className="text-xs text-gray-500 mb-3">Your delivery earnings are paid into this account. You can change it later from your Delivery Dashboard.</p>
+            <BankDetailsFields value={bank} onChange={setBank} disabled={status === "submitting"} />
+          </div>
+
           {error && <div className="text-sm p-3 rounded-lg text-red-700 bg-red-100">{error}</div>}
 
           <button
             type="submit"
-            disabled={status === "submitting" || otpState !== "verified"}
-            title={otpState !== "verified" ? "Verify your student email first" : undefined}
+            disabled={status === "submitting" || otpState !== "verified" || !bankReady}
+            title={otpState !== "verified" ? "Verify your student email first" : !bankReady ? "Add your payout account" : undefined}
             className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-full transition disabled:opacity-50 flex items-center justify-center gap-2"
           >
             {status === "submitting" && <Loader2 size={18} className="animate-spin" />}
-            {status === "submitting" ? "Submitting…" : otpState !== "verified" ? "Verify your student email first" : "Submit application"}
+            {status === "submitting" ? "Submitting…" : otpState !== "verified" ? "Verify your student email first" : !bankReady ? "Add your payout account" : "Submit application"}
           </button>
         </form>
     </MarketplacePageShell>

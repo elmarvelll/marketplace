@@ -96,7 +96,8 @@ export async function getVendorOperationsDay(dateStr: string | undefined): Promi
       },
     }),
     buildVendorManifests({ dates: [date] }),
-    prisma.slotBriefingNotice.findMany({ where: { operation: "VENDOR", date }, select: { slotId: true, sentAt: true } }),
+    // Admin briefings only — the same table also holds deliverer, missed-shift and lock rows.
+    prisma.slotBriefingNotice.findMany({ where: { operation: "VENDOR", date, recipientKey: { startsWith: "admin:" } }, select: { slotId: true, sentAt: true } }),
   ]);
 
   const bookingIds = bookings.map((b) => b.id);

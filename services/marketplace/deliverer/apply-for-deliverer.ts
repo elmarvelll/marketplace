@@ -10,6 +10,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { badRequest, conflict } from "@/lib/service-error";
+import { resolvePayoutAccount } from "./payout-account";
 
 export interface DelivererApplicationInput {
   firstName?: string;
@@ -21,6 +22,11 @@ export interface DelivererApplicationInput {
   // VendorDeliverySlot ids the applicant prefers — a preference only, see
   // Deliverer.preferredAvailability's schema comment.
   preferredAvailability?: string[];
+  // The account deliverer payouts are sent to — required; the holder name is
+  // resolved through Paystack (payout-account.ts), never taken from the form.
+  bankName?: string;
+  bankCode?: string;
+  accountNumber?: string;
 }
 
 export async function applyForDeliverer(userId: string, input: DelivererApplicationInput) {
@@ -48,15 +54,16 @@ export async function applyForDeliverer(userId: string, input: DelivererApplicat
   const hall = input.hall?.trim() || undefined;
   const room = input.room?.trim() || undefined;
   const preferredAvailability = (input.preferredAvailability ?? []).filter(Boolean).join(",") || undefined;
+  const bank = await resolvePayoutAccount(input);
 
   return existing
     ? prisma.deliverer.update({
         where: { userId },
-        data: { firstName, lastName, email, phone, hall, room, preferredAvailability, status: "PENDING", appliedAt: new Date(), rejectedAt: null, rejectionReason: null },
+        data: { firstName, lastName, email, phone, hall, room, preferredAvailability, ...bank, paystackRecipientCode: null, status: "PENDING", appliedAt: new Date(), rejectedAt: null, rejectionReason: null },
         select: { id: true, status: true, appliedAt: true },
       })
     : prisma.deliverer.create({
-        data: { userId, firstName, lastName, email, phone, hall, room, preferredAvailability },
+        data: { userId, firstName, lastName, email, phone, hall, room, preferredAvailability, ...bank },
         select: { id: true, status: true, appliedAt: true },
       });
 }

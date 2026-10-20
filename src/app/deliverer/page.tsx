@@ -15,11 +15,12 @@
 
 import { useEffect, useState } from "react";
 import { isAxiosError } from "axios";
-import { AlertCircle, CalendarClock, ClipboardList, Loader2, Package, Truck } from "lucide-react";
+import { AlertCircle, CalendarClock, ClipboardList, Landmark, Loader2, Package, Truck } from "lucide-react";
 import DashboardNavbar from "@/app/components/dashboard/student/DashboardNavbar";
 import api from "@/lib/axios";
 import MarketplacePageShell from "@/app/_components/MarketplacePageShell";
 import DeliveryCards, { type ManifestCard, type ShiftCounts } from "./_components/DeliveryCards";
+import PayoutAccountSection from "./_components/PayoutAccountSection";
 
 interface Handoff {
   id: string;
@@ -247,6 +248,14 @@ export default function DelivererDashboardPage() {
               ))}
             </div>
           )}
+        </section>
+
+        <section className="print:hidden">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <Landmark size={16} className="text-gray-500" />
+            Payout account
+          </h2>
+          <PayoutAccountSection />
         </section>
 
         <section className="print:hidden">

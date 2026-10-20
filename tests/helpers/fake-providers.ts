@@ -6,6 +6,7 @@
 //
 //   paystack.set(reference, { status: "success", amount: 150000 })   // kobo
 //   paystack.fail("timeout" | "http500" | "html" | "garbage")        // next verify calls
+//   paystack.accounts.set("058:0123456789", "ADA OBI")                 // bank/resolve
 //   resend.sent / resend.failNext(n)
 
 type PaystackTxn = { status: string; amount: number; currency?: string; reference?: string };
@@ -13,6 +14,8 @@ type FailureMode = "timeout" | "http500" | "html" | "garbage" | null;
 
 export const paystack = {
   transactions: new Map<string, PaystackTxn>(),
+  // Bank accounts Paystack can resolve: `${bankCode}:${accountNumber}` -> account holder name.
+  accounts: new Map<string, string>(),
   verifyCalls: [] as string[],
   failure: null as FailureMode,
   set(reference: string, txn: PaystackTxn) {
@@ -23,6 +26,7 @@ export const paystack = {
   },
   reset() {
     this.transactions.clear();
+    this.accounts.clear();
     this.verifyCalls = [];
     this.failure = null;
   },
@@ -60,6 +64,13 @@ export function installFakeProviders() {
       const txn = paystack.transactions.get(reference);
       if (!txn) return json({ status: false, message: "Transaction reference not found" }, 400);
       return json({ status: true, data: { status: txn.status, amount: txn.amount, currency: txn.currency ?? "NGN", reference: txn.reference ?? reference, paid_at: null } });
+    }
+
+    if (url.startsWith("https://api.paystack.co/bank/resolve")) {
+      const params = new URL(url).searchParams;
+      const name = paystack.accounts.get(`${params.get("bank_code")}:${params.get("account_number")}`);
+      if (!name) return json({ status: false, message: "Could not resolve account name" }, 422);
+      return json({ status: true, data: { account_number: params.get("account_number"), account_name: name } });
     }
 
     if (url.startsWith("https://api.resend.com/emails")) {

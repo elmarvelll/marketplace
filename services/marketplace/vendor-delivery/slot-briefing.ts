@@ -209,23 +209,56 @@ async function notifyMissedShifts(now: Date): Promise<number> {
   return notified;
 }
 
+// Assigns one occurrence's paid, unassigned deliveries to their planned
+// deliverers. Serialized per occurrence by a short-lived lock row (unique
+// index), because it runs both from the scheduled job and whenever a
+// deliverer or admin opens their dashboard: two overlapping runs could
+// otherwise each pick up the same "ready" items. A lock left by a crashed
+// run expires after 2 minutes. Returns how many items it assigned.
+const ASSIGN_LOCK = "lock:auto-assign";
+const ASSIGN_LOCK_STALE_MS = 2 * 60_000;
+
+async function assignOccurrence(slotId: string, date: Date): Promise<number> {
+  await prisma.slotBriefingNotice.deleteMany({
+    where: { operation: "VENDOR", slotId, date, recipientKey: ASSIGN_LOCK, sentAt: { lt: new Date(Date.now() - ASSIGN_LOCK_STALE_MS) } },
+  });
+  if (!(await claim(slotId, date, ASSIGN_LOCK))) return 0; // another run is assigning this occurrence right now
+  try {
+    const ready = await prisma.orderItem.findMany({
+      where: { ...READY_ITEM_WHERE, order: { vendorDeliveryBooking: { slotId, bookedFor: date } } },
+      select: { id: true },
+    });
+    if (ready.length === 0) return 0;
+    const result = await assignPlannedDeliveries(ready.map((r) => r.id), SLOT_BRIEFING_ACTOR);
+    return result.assigned.reduce((sum, a) => sum + a.itemCount, 0);
+  } catch (err) {
+    console.error(`[slot-briefing] auto-assign for ${slotId} on ${isoDate(date)} failed:`, err instanceof Error ? err.message : err);
+    return 0;
+  } finally {
+    await release(slotId, date, ASSIGN_LOCK);
+  }
+}
+
+// The assignment step on its own, for every occurrence inside its two-hour
+// window — called when a deliverer or admin opens their dashboard, so their
+// cards are complete from the two-hour mark even if the scheduled job is
+// late. Sends no briefings (the job does that). Never throws.
+export async function assignDueDeliveries(now: Date = new Date()): Promise<number> {
+  try {
+    let total = 0;
+    for (const { slot, date } of await dueOccurrences(now)) total += await assignOccurrence(slot.id, date);
+    return total;
+  } catch (err) {
+    console.error("[slot-briefing] on-demand auto-assign failed:", err instanceof Error ? err.message : err);
+    return 0;
+  }
+}
+
 export async function runSlotBriefings(now: Date = new Date()): Promise<SlotBriefingRun> {
   const run: SlotBriefingRun = { occurrences: [], missedShiftNotices: 0 };
   for (const { slot, date } of await dueOccurrences(now)) {
     // 1. Auto-assign planned deliveries (idempotent: assigned items are no longer "ready").
-    const ready = await prisma.orderItem.findMany({
-      where: { ...READY_ITEM_WHERE, order: { vendorDeliveryBooking: { slotId: slot.id, bookedFor: date } } },
-      select: { id: true },
-    });
-    let newlyAssigned = 0;
-    if (ready.length > 0) {
-      try {
-        const result = await assignPlannedDeliveries(ready.map((r) => r.id), SLOT_BRIEFING_ACTOR);
-        newlyAssigned = result.assigned.reduce((sum, a) => sum + a.itemCount, 0);
-      } catch (err) {
-        console.error(`[slot-briefing] auto-assign for ${slot.id} on ${isoDate(date)} failed:`, err instanceof Error ? err.message : err);
-      }
-    }
+    const newlyAssigned = await assignOccurrence(slot.id, date);
 
     const summary = await summarizeOccurrence(slot, date, newlyAssigned);
     let adminsNotified = 0;

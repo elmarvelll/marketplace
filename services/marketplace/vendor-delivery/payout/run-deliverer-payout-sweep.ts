@@ -14,13 +14,17 @@ import { processDelivererPayout } from "./process-deliverer-payout";
 const MAX_PAYOUT_ATTEMPTS = 5;
 
 export async function runDelivererPayoutSweep(): Promise<{ processed: number; succeeded: number; failed: number; skipped: number }> {
+  // Only deliverers with a complete payout account (deliverer/payout-account.ts).
+  // Anyone else's payouts wait in PAYOUT_PENDING — untouched, no attempt used —
+  // until they add one from their Delivery Dashboard.
+  const payable = { deliveryman: { bankCode: { not: null }, accountNumber: { not: null }, accountHolderName: { not: null } } };
   const pendingHandoffs = await prisma.delivery_x_businesses.findMany({
-    where: { delivererPayoutStatus: "PAYOUT_PENDING" },
+    where: { delivererPayoutStatus: "PAYOUT_PENDING", ...payable },
     select: { id: true },
   });
 
   const retryableFailed = await prisma.delivery_x_businesses.findMany({
-    where: { delivererPayoutStatus: "PAYOUT_FAILED", delivererPayoutAttempts: { lt: MAX_PAYOUT_ATTEMPTS } },
+    where: { delivererPayoutStatus: "PAYOUT_FAILED", delivererPayoutAttempts: { lt: MAX_PAYOUT_ATTEMPTS }, ...payable },
     select: { id: true },
   });
 

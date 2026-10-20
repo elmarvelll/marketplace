@@ -22,6 +22,10 @@ interface DelivererRow {
   lastName: string;
   email: string;
   phone: string | null;
+  hasPayoutAccount?: boolean;
+  bankName?: string | null;
+  accountHolderName?: string | null;
+  accountNumberLast4?: string | null;
   // Location info (spec §69) — shown here since an admin reviewing an
   // application legitimately needs it.
   hall: string | null;
@@ -134,6 +138,9 @@ export default function AdminDeliverersPage() {
                   {d.firstName} {d.lastName}
                 </p>
                 <p className="text-xs text-gray-500">{d.email} {d.phone && `· ${d.phone}`}</p>
+                <p className={`text-xs ${d.hasPayoutAccount ? "text-gray-500" : "text-amber-700"}`}>
+                  {d.hasPayoutAccount ? `Payout: ${d.accountHolderName} · ${d.bankName} •••• ${d.accountNumberLast4}` : "No payout account — payouts are held"}
+                </p>
                 {(d.hall || d.room) && (
                   <p className="text-xs text-gray-500">
                     {[d.hall, d.room].filter(Boolean).join(", ")}
