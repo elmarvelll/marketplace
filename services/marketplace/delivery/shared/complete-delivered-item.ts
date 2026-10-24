@@ -7,23 +7,32 @@
 // vendor-delivery/handover/submit-delivery-code.ts), so both complete a
 // delivery identically.
 //
-// Conditional on the item still being in flight (PICKED_UP or
-// OUT_FOR_DELIVERY): returns false and changes nothing if it was already
-// completed or taken out of delivery meanwhile, so a duplicate or racing
-// submission never repeats side effects.
+// Conditional on the item still being in flight (by default PICKED_UP or
+// OUT_FOR_DELIVERY; a Vendor delivery has no online pickup step, so its
+// callers pass VENDOR_OPEN_DELIVERY_STATUSES, which includes ASSIGNED):
+// returns false and changes nothing if it was already completed or taken out
+// of delivery meanwhile, so a duplicate or racing submission never repeats
+// side effects.
 
+import type { DeliveryStatus } from "@prisma/client";
 import type { Db } from "@/services/marketplace/order/shared/db";
 import { recordOrderEvent } from "@/services/marketplace/order/record-order-event";
 import { recomputeOrderDeliveryOutcome } from "@/services/marketplace/order/recompute-order-delivery-outcome";
 import { markItemEligibleForPayout } from "@/services/marketplace/escrow/mark-item-eligible-for-payout";
 
+// A Vendor Market item is "processing" from assignment until the student's
+// code completes it. PICKED_UP / OUT_FOR_DELIVERY only occur on items from
+// before the pickup step was removed, and are treated the same.
+export const VENDOR_OPEN_DELIVERY_STATUSES: DeliveryStatus[] = ["ASSIGNED", "PICKED_UP", "OUT_FOR_DELIVERY"];
+
 export async function completeDeliveredItem(
   tx: Db,
   item: { deliveryItemId: string; orderItemId: string; orderId: string },
-  actor: { delivererId: string; now: Date; by?: { type: "admin"; id: string; note: string }; codeVerified?: boolean }
+  actor: { delivererId: string; now: Date; by?: { type: "admin"; id: string; note: string }; codeVerified?: boolean },
+  fromStatuses: DeliveryStatus[] = ["PICKED_UP", "OUT_FOR_DELIVERY"]
 ): Promise<boolean> {
   const moved = await tx.deliveryItem.updateMany({
-    where: { id: item.deliveryItemId, status: { in: ["PICKED_UP", "OUT_FOR_DELIVERY"] } },
+    where: { id: item.deliveryItemId, status: { in: fromStatuses } },
     data: { status: "DELIVERED" },
   });
   if (moved.count === 0) return false;

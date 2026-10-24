@@ -1,9 +1,10 @@
 // .../deliverer/bookings/[bookingId]/confirm/route.ts
 //
 // POST { code, submissionId, clientRecordedAt? } -> submit the student's
-// six-digit code, live or from the offline queue. Always 200 with the
-// server's verdict ({ outcome: VERIFIED | REJECTED | LATE_REVIEW }) so the
-// queue can settle it; 4xx only for requests that can never succeed. See
+// six-digit code, live or from the offline queue. This alone completes the
+// delivery — no pickup or check-in step comes first. Always 200 with the
+// server's verdict ({ outcome: VERIFIED (late?) | REJECTED }) so the queue
+// can settle it; 4xx only for requests that can never succeed. See
 // services/marketplace/vendor-delivery/handover/submit-delivery-code.ts.
 
 import { NextRequest, NextResponse } from "next/server";

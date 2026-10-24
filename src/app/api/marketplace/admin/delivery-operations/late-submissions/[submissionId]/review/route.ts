@@ -1,7 +1,8 @@
 // .../admin/delivery-operations/late-submissions/[submissionId]/review/route.ts
 //
-// POST { decision: "COMPLETED" | "DECLINED", note } -> decide a delivery
-// confirmation received after its 24-hour deadline. Audited.
+// POST { decision: "COMPLETED" | "DECLINED", note } -> decide a LEGACY late
+// confirmation (from before a correct late code completed the delivery by
+// itself, recorded as late). Audited.
 
 import { NextRequest, NextResponse } from "next/server";
 import { runController, readJsonBody } from "@/lib/controller-helpers";

@@ -20,6 +20,8 @@ export async function sendPickupDeadlineReminders(): Promise<{ remindersSent: nu
   const handoffs = await prisma.delivery_x_businesses.findMany({
     where: {
       delivererConfirmedPickupAt: null,
+      // Business only: Vendor Market runs have no pickup code or pickup deadline.
+      business: { type: "BUSINESS" },
       pickupOtpExpiry: { not: null, lte: reminderCutoff, gt: now },
       pickupDeadlineReminderSentAt: null,
     },

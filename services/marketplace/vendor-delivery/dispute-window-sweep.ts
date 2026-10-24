@@ -53,13 +53,23 @@ export async function runDisputeWindowSweep(): Promise<{ ordersFinalized: number
       id: true,
       businessId: true,
       deliverymanId: true,
+      delivererConfirmedPickupAt: true,
     },
   });
 
   let payoutsReleased = 0;
   for (const handoff of pendingHandoffs) {
+    // Only the orders collected in THIS pickup — confirm-pickup.ts stamps the
+    // handoff and each order it covers with the same delivererConfirmedPickupAt.
+    // (Matching on vendor + deliverer alone pulled in every order they ever
+    // carried together: one failed order, or a later run still in progress,
+    // held this pickup's pay forever.)
     const orders = await prisma.order.findMany({
-      where: { businessId: handoff.businessId, items: { some: { deliveryItem: { delivery: { deliverymanId: handoff.deliverymanId } } } } },
+      where: {
+        businessId: handoff.businessId,
+        delivererConfirmedPickupAt: handoff.delivererConfirmedPickupAt,
+        items: { some: { deliveryItem: { delivery: { deliverymanId: handoff.deliverymanId } } } },
+      },
       select: { deliveryOutcome: true, isDisputed: true },
     });
     if (orders.length === 0) continue;

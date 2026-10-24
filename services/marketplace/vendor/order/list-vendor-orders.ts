@@ -3,13 +3,9 @@
 // This vendor's own orders, for information only: vendors never accept,
 // reject or mark orders ready (payment confirmation confirms them, and the
 // admin-run delivery operation collects them — unlike list-seller-orders.ts's
-// Business equivalent). Once a deliverer is assigned to collect from this vendor
-// (Delivery_x_businesses — the same handoff record Business's central
-// coordinator used, reused unchanged here per
-// docs/marketplace/decisions/vendor-independent-architecture.md), the
-// pickup code is surfaced here so the VENDOR can show it to the deliverer
-// at their own location — there is no coordinator screen for vendor
-// pickups. Called by
+// Business equivalent). Each order shows who is collecting it; there is no
+// pickup code — the vendor hands the order over and the delivery is confirmed
+// by the student's code alone. Called by
 // src/app/api/marketplace/vendor/[id]/orders/route.controller.ts.
 //
 // Includes each order's delivery date + timeframe (via its
@@ -25,60 +21,42 @@ import { PAID_ORDER } from "@/services/marketplace/order/shared/paid-order";
 export async function listVendorOrders(businessId: string) {
   await requireOwnedVendor(businessId);
 
-  const [orders, handoffs] = await Promise.all([
-    prisma.order.findMany({
-      // Paid orders only — an abandoned/failed/unpaid checkout never reaches
-      // the vendor (order/shared/paid-order.ts).
-      where: { businessId, ...PAID_ORDER },
-      select: {
-        id: true,
-        status: true,
-        fulfillmentStatus: true,
-        deliveryOutcome: true,
-        totalAmount: true,
-        createdAt: true,
-        sellerMarkedReadyAt: true,
-        deliveryLocation: true,
-        isDisputed: true,
-        vendorDeliveryBooking: { select: { bookedFor: true, slot: { select: { id: true, label: true, windowStart: true } } } },
-        items: {
-          select: {
-            id: true,
-            quantity: true,
-            price: true,
-            deliveryStatus: true,
-            rejectedAt: true,
-            cancelledAt: true,
-            deliveryItem: { select: { delivery: { select: { deliveryman: { select: { firstName: true, lastName: true } } } } } },
-            product: { select: { name: true } },
-            side: { select: { name: true } },
-          },
+  const orders = await prisma.order.findMany({
+    // Paid orders only — an abandoned/failed/unpaid checkout never reaches
+    // the vendor (order/shared/paid-order.ts).
+    where: { businessId, ...PAID_ORDER },
+    select: {
+      id: true,
+      status: true,
+      fulfillmentStatus: true,
+      deliveryOutcome: true,
+      totalAmount: true,
+      createdAt: true,
+      sellerMarkedReadyAt: true,
+      deliveryLocation: true,
+      isDisputed: true,
+      vendorDeliveryBooking: { select: { bookedFor: true, slot: { select: { id: true, label: true, windowStart: true } } } },
+      items: {
+        select: {
+          id: true,
+          quantity: true,
+          price: true,
+          deliveryStatus: true,
+          rejectedAt: true,
+          cancelledAt: true,
+          deliveryItem: { select: { delivery: { select: { deliveryman: { select: { firstName: true, lastName: true } } } } } },
+          product: { select: { name: true } },
+          side: { select: { name: true } },
         },
       },
-      // Newest first, by the authoritative creation timestamp (NOT the
-      // scheduled delivery date), sorted in the database; id is the
-      // deterministic tie-break for identical timestamps. Supersedes the
-      // earlier oldest-first rule — see
-      // docs/AKADVERSE_IMPLEMENTATION_CHANGELOG.md, section E.
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    }),
-    // Every currently-uncollected handoff for this vendor — used to show
-    // "deliverer assigned, here's the pickup code" instead of a
-    // coordinator's screen. A handoff isn't tied to one specific order (it
-    // covers every ready item for this business the deliverer is
-    // collecting in one run), so it's surfaced at the vendor level, not
-    // per-order.
-    prisma.delivery_x_businesses.findMany({
-      where: { businessId, delivererConfirmedPickupAt: null },
-      select: {
-        id: true,
-        pickupOtp: true,
-        pickupOtpExpiry: true,
-        deliveryman: { select: { firstName: true, lastName: true } },
-      },
-      orderBy: { createdAt: "desc" },
-    }),
-  ]);
+    },
+    // Newest first, by the authoritative creation timestamp (NOT the
+    // scheduled delivery date), sorted in the database; id is the
+    // deterministic tie-break for identical timestamps. Supersedes the
+    // earlier oldest-first rule — see
+    // docs/AKADVERSE_IMPLEMENTATION_CHANGELOG.md, section E.
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
 
   return {
     orders: orders.map((order) => ({
@@ -107,12 +85,6 @@ export async function listVendorOrders(businessId: string) {
         rejectedAt: item.rejectedAt?.toISOString() ?? null,
         refunded: Boolean(item.rejectedAt || item.cancelledAt),
       })),
-    })),
-    pendingPickups: handoffs.map((h) => ({
-      id: h.id,
-      pickupOtp: h.pickupOtp,
-      pickupOtpExpiry: h.pickupOtpExpiry?.toISOString() ?? null,
-      delivererName: `${h.deliveryman.firstName} ${h.deliveryman.lastName}`,
     })),
   };
 }

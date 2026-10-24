@@ -62,26 +62,19 @@ CREATE TABLE "marketplace"."SlotBriefingNotice" (
     CONSTRAINT "SlotBriefingNotice_pkey" PRIMARY KEY ("id")
 );
 
--- A deliverer's shift (one slot occurrence they hold deliveries in) was started: they reported at the meeting point,
--- an admin (vendor manager) checked them in and handed over their card. Until then their pickups and deliveries for
--- that occurrence are refused; with no row by the slot's end the shift is missed. late = checked in only after the
--- slot ended (an admin unlocking a missed shift, with a note) — it still counts as missed.
-CREATE TABLE "marketplace"."DeliveryShiftCheckIn" (
+-- The physical delivery card for one deliverer's share of one slot occurrence, handed over by the admin acting as
+-- vendor manager. Acknowledgement only — no delivery state depends on it.
+CREATE TABLE "marketplace"."DeliveryCardHandover" (
     "id" TEXT NOT NULL,
     "operation" "marketplace"."DeliveryOperation" NOT NULL,
     "slotId" TEXT NOT NULL,
     "date" DATE NOT NULL,
     "delivererId" TEXT NOT NULL,
-    "checkedInAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "checkedInBy" TEXT NOT NULL,
-    "late" BOOLEAN NOT NULL DEFAULT false,
-    "note" TEXT,
+    "handedOverAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "handedOverBy" TEXT NOT NULL,
 
-    CONSTRAINT "DeliveryShiftCheckIn_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "DeliveryCardHandover_pkey" PRIMARY KEY ("id")
 );
-
--- Where deliverers report before their shift (one place per operation for now).
-ALTER TABLE "marketplace"."DeliveryRosterSettings" ADD COLUMN "checkInLocation" TEXT;
 
 CREATE UNIQUE INDEX "DeliveryHandoverCode_bookingId_key" ON "marketplace"."DeliveryHandoverCode"("bookingId");
 
@@ -93,7 +86,7 @@ CREATE INDEX "DeliveryCodeSubmission_outcome_reviewedAt_idx" ON "marketplace"."D
 
 CREATE UNIQUE INDEX "SlotBriefingNotice_operation_slotId_date_recipientKey_key" ON "marketplace"."SlotBriefingNotice"("operation", "slotId", "date", "recipientKey");
 
-CREATE UNIQUE INDEX "DeliveryShiftCheckIn_operation_slotId_date_delivererId_key" ON "marketplace"."DeliveryShiftCheckIn"("operation", "slotId", "date", "delivererId");
+CREATE UNIQUE INDEX "DeliveryCardHandover_operation_slotId_date_delivererId_key" ON "marketplace"."DeliveryCardHandover"("operation", "slotId", "date", "delivererId");
 
 -- Runtime role, if provisioned (restricted mode): exactly the rows db/runtime-grants.json lists. Nothing here is ever
 -- deleted except a briefing notice whose send failed (so the next run retries it).
@@ -103,6 +96,6 @@ BEGIN
     GRANT SELECT, INSERT, UPDATE ON "marketplace"."DeliveryHandoverCode" TO marketplace_app;
     GRANT SELECT, INSERT, UPDATE ON "marketplace"."DeliveryCodeSubmission" TO marketplace_app;
     GRANT SELECT, INSERT, DELETE ON "marketplace"."SlotBriefingNotice" TO marketplace_app;
-    GRANT SELECT, INSERT ON "marketplace"."DeliveryShiftCheckIn" TO marketplace_app;
+    GRANT SELECT, INSERT ON "marketplace"."DeliveryCardHandover" TO marketplace_app;
   END IF;
 END $$;

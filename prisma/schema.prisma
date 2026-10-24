@@ -1781,12 +1781,21 @@ model DeliveryHandoverCode {
   @@schema("marketplace")
 }
 
-// Every delivery-code submission, online or synced from a deliverer's offline queue. submissionId is the client's
-// idempotency key. receivedAt (server time) decides the 24-hour deadline; clientRecordedAt is audit-only. The submitted
-// code is never stored — only whether it matched.
+enum DeliveryConfirmationMethod {
+  DELIVERER
+  ADMIN_FALLBACK
+
+  @@schema("marketplace")
+}
+
+// Every delivery-code submission, online or synced from a deliverer's offline queue, or entered by an admin on the
+// deliverer's behalf (method ADMIN_FALLBACK: enteredBy = the admin, fallbackReason required). submissionId is the
+// client's idempotency key. receivedAt (server time) decides the end-of-day deadline (late = received at or after it);
+// clientRecordedAt is audit-only. delivererId is whose items the code completes. The submitted code is never stored —
+// only whether it matched. LATE_REVIEW is legacy (a late code used to wait for an admin; it now completes, late = true).
 model DeliveryCodeSubmission {
-  id               String                    @id @default(uuid())
-  submissionId     String                    @unique
+  id               String                     @id @default(uuid())
+  submissionId     String                     @unique
   bookingId        String
   delivererId      String
   outcome          DeliverySubmissionOutcome
@@ -1794,7 +1803,11 @@ model DeliveryCodeSubmission {
   codeMatched      Boolean
   deadlineAt       DateTime
   clientRecordedAt DateTime?
-  receivedAt       DateTime                  @default(now())
+  receivedAt       DateTime                   @default(now())
+  method           DeliveryConfirmationMethod @default(DELIVERER)
+  enteredBy        String?
+  fallbackReason   String?
+  late             Boolean                    @default(false)
   reviewedAt       DateTime?
   reviewedBy       String?
   reviewDecision   String?
@@ -1818,9 +1831,25 @@ model SlotBriefingNotice {
   @@schema("marketplace")
 }
 
-// A deliverer's shift for one slot occurrence was started: an admin (vendor manager) checked them in at the meeting
-// point and handed over their card. Gates their pickups and deliveries; none by the slot's end = missed. late = an
-// admin unlocked it after the slot ended (still counted as missed). See vendor-delivery/handover/shift.ts.
+// LEGACY — unused. Created by migration 20261020120000 (a "card handed over" acknowledgement), superseded by
+// DeliveryShiftCheckIn in 20261021120000 before anything wrote to it. Kept so this schema matches the database (dropping
+// it would need a destructive migration); the runtime role has no access to it. Don't use.
+model DeliveryCardHandover {
+  id           String            @id @default(uuid())
+  operation    DeliveryOperation
+  slotId       String
+  date         DateTime          @db.Date
+  delivererId  String
+  handedOverAt DateTime          @default(now())
+  handedOverBy String
+
+  @@unique([operation, slotId, date, delivererId])
+  @@schema("marketplace")
+}
+
+// Attendance only: an admin (vendor manager) recorded that a deliverer reported at the meeting point for one slot
+// occurrence. Never a prerequisite for processing or delivering (that needs only the assignment and the student's
+// code). late = recorded after the slot had ended. See vendor-delivery/handover/shift.ts.
 model DeliveryShiftCheckIn {
   id          String            @id @default(uuid())
   operation   DeliveryOperation
@@ -1833,5 +1862,24 @@ model DeliveryShiftCheckIn {
   note        String?
 
   @@unique([operation, slotId, date, delivererId])
+  @@schema("marketplace")
+}
+
+// A Vendor booking whose delivery-code deadline (end of the delivery day, school time — handover/delivery-deadline.ts)
+// passed without a valid confirmation. Flagged once per (booking, deadline) by the vendor-slot-briefing job and shown
+// to admins; resolved (never deleted) once the booking is delivered or cancelled, so the overdue history stays. Being
+// overdue is missing confirmation, not proof of non-delivery: nothing is cancelled, refunded or paid because of it.
+model DeliveryConfirmationOverdue {
+  id               String    @id @default(uuid())
+  bookingId        String
+  deadlineAt       DateTime
+  flaggedAt        DateTime  @default(now())
+  adminsNotifiedAt DateTime?
+  resolvedAt       DateTime?
+  // "DELIVERED" (a valid code arrived after the deadline) or "CANCELLED".
+  resolution       String?
+
+  @@unique([bookingId, deadlineAt])
+  @@index([resolvedAt])
   @@schema("marketplace")
 }

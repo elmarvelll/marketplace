@@ -57,8 +57,9 @@
     "RosterException": { "why": "Date-specific roster overrides (set and restored by an admin).", "privileges": ["SELECT", "INSERT", "UPDATE", "DELETE"] },
     "ScheduledDelivery": { "why": "Per-order slot occurrence and planned deliverer (history kept, never deleted).", "privileges": ["SELECT", "INSERT", "UPDATE"] },
     "DeliveryHandoverCode": { "why": "Student handover code per vendor booking (hash + server-encrypted copy + masked view); attempts and verification.", "privileges": ["SELECT", "INSERT", "UPDATE"] },
-    "DeliveryCodeSubmission": { "why": "Audit/idempotency record of each delivery-code submission; admin review of late ones.", "privileges": ["SELECT", "INSERT", "UPDATE"] },
+    "DeliveryCodeSubmission": { "why": "Audit/idempotency record of each delivery-code submission (deliverer or admin fallback); admin review of late ones.", "privileges": ["SELECT", "INSERT", "UPDATE"] },
     "SlotBriefingNotice": { "why": "Pre-slot briefing sent-record (deleted only when a send failed, so the next run retries it).", "privileges": ["SELECT", "INSERT", "DELETE"] },
-    "DeliveryShiftCheckIn": { "why": "Admin check-in that starts a deliverer's shift (gates their pickups/deliveries; append-only).", "privileges": ["SELECT", "INSERT"] }
+    "DeliveryShiftCheckIn": { "why": "Admin attendance check-in of a deliverer at the meeting point (record only, never a delivery prerequisite; append-only).", "privileges": ["SELECT", "INSERT"] },
+    "DeliveryConfirmationOverdue": { "why": "Bookings whose delivery-code deadline passed unconfirmed (flagged by the briefing job, resolved later; never deleted).", "privileges": ["SELECT", "INSERT", "UPDATE"] }
   }
 }

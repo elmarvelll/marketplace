@@ -1,20 +1,15 @@
 // services/marketplace/vendor-delivery/handover/shift.ts
 //
-// A deliverer's SHIFT = one Vendor slot occurrence (slot + date) in which
-// they hold assigned deliveries. Before working it they report to the
-// meeting point; an admin (vendor manager) checks them in, which starts the
-// shift and hands over their card. States, as both sides see them:
+// Deliverer ATTENDANCE for one Vendor slot occurrence (slot + date) in which
+// they hold deliveries: an admin (vendor manager) may record that they
+// reported at the meeting point. It is a record only — it never gates
+// anything. A deliverer processes and delivers their assigned orders without
+// an admin being present or online; completing a delivery needs only the
+// student's code (submit-delivery-code.ts).
 //
-//   SCHEDULED    not checked in yet, slot not over
-//   IN_PROGRESS  checked in; deliveries under way
-//   DELIVERED    checked in; every delivery done (or cancelled)
-//   MISSED       the slot ended without a check-in. An admin may still
-//                unlock it afterwards (late check-in, with a note) so the
-//                deliveries can be finished — it stays counted as missed.
-//
-// The check-in is enforced, not just displayed: requireShiftCheckIn gates
-// the deliverer's vendor pickups, starting a delivery, reporting a failed
-// attempt and confirming with the student's code.
+//   attendance  CHECKED_IN      recorded before the slot ended
+//               CHECKED_IN_LATE recorded after the slot had ended
+//               NOT_RECORDED    no check-in (says nothing about the deliveries)
 //
 // Meeting point: ONE location per operation for now (all deliverers are
 // male). When female deliverers join, this needs separate meeting points
@@ -27,18 +22,11 @@ import { badRequest, conflict } from "@/lib/service-error";
 import { logAdminAction } from "@/services/marketplace/admin/shared/log-admin-action";
 import { slotEndsAt } from "./delivery-deadline";
 
-export type ShiftState = "SCHEDULED" | "IN_PROGRESS" | "DELIVERED" | "MISSED";
+export type Attendance = "CHECKED_IN" | "CHECKED_IN_LATE" | "NOT_RECORDED";
 
-export interface ShiftCheckInRow {
-  checkedInAt: Date;
-  late: boolean;
-}
-
-// done = every live delivery of the shift is finished (delivered, or failed/cancelled and out of the deliverer's hands).
-export function shiftState(checkIn: ShiftCheckInRow | null, slotEnd: Date, done: boolean, now: Date = new Date()): { state: ShiftState; unlocked: boolean } {
-  if (!checkIn) return { state: now > slotEnd ? "MISSED" : "SCHEDULED", unlocked: false };
-  if (checkIn.late) return { state: "MISSED", unlocked: true };
-  return { state: done ? "DELIVERED" : "IN_PROGRESS", unlocked: true };
+export function attendanceOf(checkIn: { late: boolean } | null): Attendance {
+  if (!checkIn) return "NOT_RECORDED";
+  return checkIn.late ? "CHECKED_IN_LATE" : "CHECKED_IN";
 }
 
 export async function getCheckInLocation(operation: "VENDOR" | "MARKETPLACE" = "VENDOR"): Promise<string | null> {
@@ -58,19 +46,8 @@ export async function setCheckInLocation(adminUserId: string, location: unknown,
   return { location: clean };
 }
 
-// Refuses a deliverer's vendor action for a slot occurrence they haven't been checked in for.
-export async function requireShiftCheckIn(delivererId: string, slotId: string, date: Date) {
-  const row = await prisma.deliveryShiftCheckIn.findUnique({
-    where: { operation_slotId_date_delivererId: { operation: "VENDOR", slotId, date, delivererId } },
-    select: { id: true },
-  });
-  if (row) return;
-  const location = await getCheckInLocation();
-  throw conflict(`Your shift hasn't started. Report to ${location ?? "the meeting point"} so an admin can check you in.`);
-}
-
-// Admin: the deliverer reported at the meeting point — start their shift. After the slot has ended this is a late
-// unlock of a missed shift and needs a note. Idempotent.
+// Admin: the deliverer reported at the meeting point — record it. After the slot has ended it is recorded as late.
+// Idempotent. Optional note, audited.
 export async function checkInShift(adminUserId: string, input: { date?: unknown; slotId?: unknown; delivererId?: unknown; note?: unknown }, now: Date = new Date()) {
   const { date: dateStr, slotId, delivererId } = input;
   if (typeof dateStr !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || typeof slotId !== "string" || typeof delivererId !== "string") {
@@ -86,7 +63,6 @@ export async function checkInShift(adminUserId: string, input: { date?: unknown;
 
   const late = now > slotEndsAt(date, slot.windowEnd);
   const note = typeof input.note === "string" ? input.note.trim().slice(0, 500) : "";
-  if (late && !note) throw badRequest("This slot is over, so the shift was missed. Give a reason to let them finish anyway.");
 
   try {
     await prisma.deliveryShiftCheckIn.create({ data: { operation: "VENDOR", slotId, date, delivererId, checkedInBy: adminUserId, late, note: note || null } });
@@ -96,7 +72,7 @@ export async function checkInShift(adminUserId: string, input: { date?: unknown;
   }
   await logAdminAction({
     adminId: adminUserId,
-    action: late ? "DELIVERY_SHIFT_UNLOCKED_LATE" : "DELIVERY_SHIFT_CHECKED_IN",
+    action: late ? "DELIVERY_SHIFT_CHECKED_IN_LATE" : "DELIVERY_SHIFT_CHECKED_IN",
     targetType: "Deliverer",
     targetId: delivererId,
     message: `${dateStr} slot ${slotId}${note ? `: ${note}` : ""}`,

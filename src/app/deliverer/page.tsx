@@ -4,10 +4,11 @@
 // "Delivery Dashboard" link once a deliverer is approved (see
 // services/marketplace/deliverer/deliverer.service.ts); every API call here still 403s server-side for a
 // non-approved deliverer regardless of how someone reaches this URL. Shows
-// the Vendor Market delivery cards (one per slot, confirmed per student with
-// the student's code — see _components/DeliveryCards.tsx), pending pickup
-// handoffs (with the seller<->deliverer OTP entry) and every assigned
-// Business delivery item across its lifecycle. The deliverer never adds
+// the Vendor Market delivery cards (one per slot: processing until each
+// student's code confirms it — no pickup or check-in step; see
+// _components/DeliveryCards.tsx), Business pending pickup handoffs (with the
+// coordinator<->deliverer OTP entry) and every assigned Business delivery item
+// across its lifecycle. The deliverer never adds
 // items manually — everything shown here was assigned by an admin or the
 // roster. See docs/marketplace/systems/deliverer-system.md.
 
@@ -19,7 +20,7 @@ import { AlertCircle, CalendarClock, ClipboardList, Landmark, Loader2, Package, 
 import DashboardNavbar from "@/app/components/dashboard/student/DashboardNavbar";
 import api from "@/lib/axios";
 import MarketplacePageShell from "@/app/_components/MarketplacePageShell";
-import DeliveryCards, { type ManifestCard, type ShiftCounts } from "./_components/DeliveryCards";
+import DeliveryCards, { type ManifestCard } from "./_components/DeliveryCards";
 import PayoutAccountSection from "./_components/PayoutAccountSection";
 
 interface Handoff {
@@ -72,7 +73,6 @@ export default function DelivererDashboardPage() {
   const [items, setItems] = useState<DeliveryItemRow[]>([]);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [cards, setCards] = useState<ManifestCard[]>([]);
-  const [shiftCounts, setShiftCounts] = useState<ShiftCounts | undefined>();
   const [loadState, setLoadState] = useState<"loading" | "loaded" | "forbidden" | "error">("loading");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -85,13 +85,12 @@ export default function DelivererDashboardPage() {
         api.get<{ handoffs: Handoff[] }>("/marketplace/deliverer/handoffs"),
         api.get<{ items: DeliveryItemRow[] }>("/marketplace/deliverer/deliveries"),
         api.get<{ roster: RosterEntry[] }>("/marketplace/deliverer/roster"),
-        api.get<{ cards: ManifestCard[]; shiftCounts: ShiftCounts }>("/marketplace/deliverer/manifest"),
+        api.get<{ cards: ManifestCard[] }>("/marketplace/deliverer/manifest"),
       ]);
       setHandoffs(handoffsRes.data.handoffs);
       setItems(itemsRes.data.items);
       setRoster(rosterRes.data.roster);
       setCards(manifestRes.data.cards);
-      setShiftCounts(manifestRes.data.shiftCounts);
       setLoadState("loaded");
     } catch (err) {
       if (silent && isAxiosError(err) && !err.response) return; // offline: keep showing what we have
@@ -218,16 +217,16 @@ export default function DelivererDashboardPage() {
             <ClipboardList size={16} className="text-gray-500" />
             Vendor delivery cards
           </h2>
-          <DeliveryCards cards={cards} shiftCounts={shiftCounts} onChanged={() => void load({ silent: true })} />
+          <DeliveryCards cards={cards} onChanged={() => void load({ silent: true })} />
         </section>
 
         <section className="print:hidden">
           <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
             <Package size={16} className="text-gray-500" />
-            Pending pickups
+            Pending pickups (Marketplace Business orders)
           </h2>
           {pendingHandoffs.length === 0 ? (
-            <p className="text-sm text-gray-500">No pickups waiting on your OTP handoff.</p>
+            <p className="text-sm text-gray-500">No Business pickups waiting on your OTP handoff. Vendor Market orders need no pickup confirmation.</p>
           ) : (
             <div className="space-y-2">
               {pendingHandoffs.map((h) => (

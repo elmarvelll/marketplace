@@ -1,23 +1,38 @@
 // services/marketplace/vendor-delivery/handover/delivery-deadline.ts
 //
 // The server-authoritative deadline for confirming a Vendor delivery with the
-// student's code: 24 hours after the booked slot ENDS (school time). If a
-// failed attempt rescheduled the delivery (report-failed-attempt.ts sets
-// retryDeliveryAt), the window runs from that retry time instead, so a
-// legitimate second attempt isn't already out of time.
+// student's code: the END of the school-local calendar day the delivery is due
+// (SCHOOL_TIMEZONE, Africa/Lagos) — i.e. midnight starting the next school day.
+// Not a rolling 24 hours, and not midnight UTC.
 //
-// Judged only against the server's own receive time — never a client clock —
-// so an offline device can't extend it.
+// The due day is the booked date. If a failed attempt rescheduled the delivery
+// (report-failed-attempt.ts sets retryDeliveryAt), it is the school day of the
+// latest retry instead, so a legitimate second attempt isn't already out of time.
+//
+// The boundary is exclusive: a confirmation received strictly before the
+// deadline is on time; at or after it, it is late (isPastDeadline). Judged only
+// against the server's own receive time — never a client clock — so an offline
+// device can't move it.
 
 import { schoolTimeToInstant } from "@/services/marketplace/vendor-delivery/is-slot-bookable";
-
-export const DELIVERY_CONFIRMATION_WINDOW_HOURS = 24;
+import { todayInSchoolTimezone } from "@/services/marketplace/vendor-delivery/validate-delivery-date";
 
 export function slotEndsAt(bookedFor: Date, windowEnd: string): Date {
   return schoolTimeToInstant(bookedFor, windowEnd);
 }
 
-export function deliveryConfirmationDeadline(bookedFor: Date, windowEnd: string, retryAts: (Date | null | undefined)[] = []): Date {
-  const from = [slotEndsAt(bookedFor, windowEnd), ...retryAts.filter((d): d is Date => Boolean(d))].reduce((a, b) => (b > a ? b : a));
-  return new Date(from.getTime() + DELIVERY_CONFIRMATION_WINDOW_HOURS * 60 * 60 * 1000);
+// The school calendar day (a UTC-midnight Date, like VendorDeliveryBooking.bookedFor) the delivery is due.
+export function deliveryDueDay(bookedFor: Date, retryAts: (Date | null | undefined)[] = []): Date {
+  const days = [bookedFor, ...retryAts.filter((d): d is Date => Boolean(d)).map((d) => todayInSchoolTimezone(d))];
+  return days.reduce((a, b) => (b > a ? b : a));
+}
+
+export function deliveryConfirmationDeadline(bookedFor: Date, retryAts: (Date | null | undefined)[] = []): Date {
+  const due = deliveryDueDay(bookedFor, retryAts);
+  const nextDay = new Date(Date.UTC(due.getUTCFullYear(), due.getUTCMonth(), due.getUTCDate() + 1));
+  return schoolTimeToInstant(nextDay, "00:00");
+}
+
+export function isPastDeadline(deadlineAt: Date, at: Date): boolean {
+  return at.getTime() >= deadlineAt.getTime();
 }

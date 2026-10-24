@@ -264,7 +264,7 @@ export function delivererSlotBriefingEmail(params: {
       <p>Hi ${escapeHtml(params.delivererName)}, you're assigned to <strong>${escapeHtml(params.deliveryDate)}, ${escapeHtml(params.slotLabel)}</strong>.</p>
       <p><strong>${params.studentDeliveries}</strong> student deliver${params.studentDeliveries === 1 ? "y" : "ies"}, from <strong>${params.vendorPickups.length}</strong> vendor pickup${params.vendorPickups.length === 1 ? "" : "s"}:</p>
       <ul>${pickups}</ul>
-      <p>Report to <strong>${escapeHtml(params.meetingPoint ?? "the meeting point")}</strong> by <strong>${escapeHtml(params.arriveBy)}</strong>. An admin will check you in, start your shift and give you your delivery card — you can't collect or deliver before that. Then pick up at each vendor using the pickup code they show you.</p>
+      <p>Be at <strong>${escapeHtml(params.meetingPoint ?? "the meeting point")}</strong> by <strong>${escapeHtml(params.arriveBy)}</strong>. Collect each order from its vendor — there's nothing to confirm at the vendor. When you hand an order to the student, enter the six-digit code they give you on your Delivery Dashboard (it's saved on your phone and sent automatically if you're offline). Confirm every delivery by the end of the day.</p>
       <p>Your delivery card — addresses, items and the partial delivery codes — is in your <a href="${appUrl("/deliverer")}">deliverer dashboard</a>.</p>
     `),
   };

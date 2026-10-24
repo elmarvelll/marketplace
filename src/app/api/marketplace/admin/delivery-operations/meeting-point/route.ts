@@ -1,6 +1,7 @@
 // .../admin/delivery-operations/meeting-point/route.ts
 //
-// GET -> where Vendor deliverers report to be checked in; PUT { location } ->
+// GET -> where Vendor deliverers meet before a slot (attendance only — never a
+// delivery prerequisite); PUT { location } ->
 // change it (empty clears). One place for now — see shift.ts on why that
 // will change when female deliverers join.
 

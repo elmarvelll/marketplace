@@ -8,6 +8,16 @@
 // confirm-pickup.ts. Called by
 // src/app/api/marketplace/admin/deliveries/route.controller.ts. See
 // docs/marketplace/systems/delivery-coordinator-system.md.
+//
+// School Vendor items are different: there is no pickup code and no online
+// pickup step (the deliverer collects at the vendor, often without a
+// connection, and the delivery is completed only by the student's code —
+// vendor-delivery/handover/submit-delivery-code.ts). Their handoff is created
+// already started: delivererConfirmedPickupAt marks the start of the
+// deliverer's custody of the run (assignment), stamped identically on each
+// order it covers, and the deliverer's pay rate is locked in now. That stamp
+// is what the dispute-window sweep groups a run's orders by before releasing
+// the deliverer's pay.
 
 import { prisma } from "@/lib/prisma";
 import { badRequest } from "@/lib/service-error";
@@ -17,6 +27,7 @@ import { sendEmail, delivererPickupAssignedEmail } from "@/services/marketplace/
 import { createNotification } from "@/services/marketplace/notifications/notification.service";
 import { READY_ITEM_WHERE } from "./shared/ready-item-filter";
 import { syncPlansToAssignment } from "@/services/marketplace/delivery-roster/delivery-plans";
+import { getMarketplaceSettings } from "@/services/marketplace/admin/shared/marketplace-settings";
 
 export async function assignDelivery(delivererId: string | undefined, orderItemIds: string[] | undefined, adminUserId: string) {
   const cleanDelivererId = delivererId?.trim();
@@ -75,6 +86,11 @@ export async function assignDelivery(delivererId: string | undefined, orderItemI
     }
   }
 
+  // Locked in for each Vendor run at assignment (see the header) — never re-read later (spec §55).
+  const vendorPayoutAmount = Array.from(businesses.values()).some((b) => b.isVendor) ? (await getMarketplaceSettings()).delivererPayoutAmount : undefined;
+  const vendorItemIds = new Set(items.filter((item) => businesses.get(businessOf(item).businessId)?.isVendor).map((item) => item.id));
+  const now = new Date();
+
   const { delivery, handoffs } = await prisma.$transaction(async (tx) => {
     const created = await tx.delivery.create({
       data: { deliverymanId: cleanDelivererId, expectedDeliveryAt: earliestEstimate, status: "ASSIGNED" },
@@ -98,7 +114,7 @@ export async function assignDelivery(delivererId: string | undefined, orderItemI
     // One pickup handoff record (and one OTP) per distinct business in
     // this batch — the handoff is between one deliverer and one business
     // at a time, even though a Delivery run can span several businesses.
-    const createdHandoffs: { businessId: string; businessName: string; pickupOtp: string; pickupOtpExpiry: string }[] = [];
+    const createdHandoffs: { businessId: string; businessName: string; pickupOtp: string | null; pickupOtpExpiry: string | null }[] = [];
     for (const [businessId, { name, earliestEstimate: businessEstimate, isVendor }] of businesses) {
       // Reassignment guard: if this business already has an unconfirmed
       // handoff (from an earlier assignDelivery call, possibly to a
@@ -128,6 +144,23 @@ export async function assignDelivery(delivererId: string | undefined, orderItemI
         });
       }
 
+      if (isVendor) {
+        await tx.delivery_x_businesses.create({
+          data: {
+            deliverymanId: cleanDelivererId,
+            businessId,
+            deliveryStatus: "ASSIGNED",
+            expectedDeliveryAt: businessEstimate ?? earliestEstimate,
+            delivererConfirmedPickupAt: now,
+            delivererPayoutAmount: vendorPayoutAmount,
+          },
+        });
+        const orderIds = Array.from(new Set(items.filter((item) => businessOf(item).businessId === businessId).map((item) => item.orderId)));
+        await tx.order.updateMany({ where: { id: { in: orderIds } }, data: { delivererConfirmedPickupAt: now } });
+        createdHandoffs.push({ businessId, businessName: name, pickupOtp: null, pickupOtpExpiry: null });
+        continue;
+      }
+
       const pickupOtp = generateOtp();
       const pickupOtpExpiry = buildPickupOtpExpiry(businessEstimate);
       await tx.delivery_x_businesses.create({
@@ -150,7 +183,9 @@ export async function assignDelivery(delivererId: string | undefined, orderItemI
 
     for (const item of items) {
       await recordOrderEvent(tx, { orderId: item.orderId, orderItemId: item.id, type: "DELIVERER_ASSIGNED", actorType: "admin", actorId: adminUserId });
-      await recordOrderEvent(tx, { orderId: item.orderId, orderItemId: item.id, type: "DELIVERER_PICKUP_OTP_ISSUED", actorType: "admin", actorId: adminUserId });
+      if (!vendorItemIds.has(item.id)) {
+        await recordOrderEvent(tx, { orderId: item.orderId, orderItemId: item.id, type: "DELIVERER_PICKUP_OTP_ISSUED", actorType: "admin", actorId: adminUserId });
+      }
     }
 
     return { delivery: created, handoffs: createdHandoffs };
@@ -160,7 +195,10 @@ export async function assignDelivery(delivererId: string | undefined, orderItemI
   // never includes the pickupOtp digits, which the coordinator reads to
   // them in person (or the coordinator re-reads later from the
   // "Deliverer assignments" admin screen).
+  // Vendor runs have no pickup code or deadline — their deliverer is briefed
+  // per slot instead (vendor-delivery/slot-briefing.ts).
   for (const handoff of handoffs) {
+    if (!handoff.pickupOtpExpiry) continue;
     void sendEmail({
       to: deliverer.email,
       ...delivererPickupAssignedEmail({

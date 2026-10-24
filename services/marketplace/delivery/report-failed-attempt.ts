@@ -5,6 +5,7 @@
 // src/app/api/marketplace/deliverer/deliveries/[deliveryItemId]/fail-attempt/route.controller.ts.
 // See docs/marketplace/decisions/second-failed-delivery-cancels.md.
 
+import type { DeliveryStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { conflict } from "@/lib/service-error";
 import { recordOrderEvent } from "@/services/marketplace/order/record-order-event";
@@ -16,9 +17,12 @@ import { requireDeliveryItem } from "./shared/require-delivery-item";
 
 const RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
 
-export async function reportFailedAttempt(delivererId: string, deliveryItemId: string, reasonInput: string) {
+// fromStatuses: a Business item must be out for delivery; a Vendor Market
+// item has no such step and may fail any time while it's processing
+// (vendor-delivery/handover/booking-delivery.ts passes those statuses).
+export async function reportFailedAttempt(delivererId: string, deliveryItemId: string, reasonInput: string, fromStatuses: DeliveryStatus[] = ["OUT_FOR_DELIVERY"]) {
   const deliveryItem = await requireDeliveryItem(delivererId, deliveryItemId);
-  if (deliveryItem.status !== "OUT_FOR_DELIVERY") throw conflict("Only an item out for delivery can be marked as a failed attempt.");
+  if (!fromStatuses.includes(deliveryItem.status)) throw conflict("Only an item out for delivery can be marked as a failed attempt.");
 
   const reason = reasonInput.trim() || "Delivery attempt failed.";
   const orderId = deliveryItem.orderItem.orderId;

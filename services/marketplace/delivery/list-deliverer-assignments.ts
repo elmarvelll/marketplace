@@ -26,7 +26,8 @@ export async function listDelivererAssignments() {
       firstName: true,
       lastName: true,
       businessHandoffs: {
-        where: { delivererConfirmedPickupAt: null },
+        // Business only: Vendor Market runs have no pickup code (a leftover one from before that change is void).
+        where: { delivererConfirmedPickupAt: null, business: { type: "BUSINESS" } },
         orderBy: { createdAt: "desc" },
         select: {
           id: true,

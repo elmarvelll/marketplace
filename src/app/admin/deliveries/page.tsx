@@ -41,12 +41,16 @@ interface DelivererRow {
   status: string;
 }
 
+// pickupOtp is null for a School Vendor handoff — Vendor Market deliveries
+// have no pickup code (assign-delivery.ts).
 interface AssignedHandoff {
   businessId: string;
   businessName: string;
-  pickupOtp: string;
-  pickupOtpExpiry: string;
+  pickupOtp: string | null;
+  pickupOtpExpiry: string | null;
 }
+type CodedHandoff = AssignedHandoff & { pickupOtp: string; pickupOtpExpiry: string };
+const withCode = (handoffs: AssignedHandoff[]) => handoffs.filter((h): h is CodedHandoff => Boolean(h.pickupOtp && h.pickupOtpExpiry));
 
 const dateFormatter = new Intl.DateTimeFormat("en-NG", { weekday: "short", month: "long", day: "numeric" });
 
@@ -66,7 +70,7 @@ export default function AdminDeliveriesPage() {
   const [loadState, setLoadState] = useState<"loading" | "loaded" | "forbidden" | "error">("loading");
   const [assigning, setAssigning] = useState(false);
   const [message, setMessage] = useState("");
-  const [lastHandoffs, setLastHandoffs] = useState<AssignedHandoff[]>([]);
+  const [lastHandoffs, setLastHandoffs] = useState<CodedHandoff[]>([]);
 
   const load = async () => {
     setLoadState("loading");
@@ -132,7 +136,7 @@ export default function AdminDeliveriesPage() {
       const done = res.data.assigned.map((a) => `${a.itemCount} to ${a.delivererName}`).join(", ");
       const skipped = res.data.skipped.length ? ` ${res.data.skipped.length} item(s) skipped: ${Array.from(new Set(res.data.skipped.map((x) => x.reason))).join(" ")}` : "";
       setMessage(`${done ? `Assigned ${done}.` : "Nothing assigned."}${skipped}`);
-      setLastHandoffs(res.data.assigned.flatMap((a) => a.handoffs));
+      setLastHandoffs(withCode(res.data.assigned.flatMap((a) => a.handoffs)));
       setSelectedItemIds([]);
       await load();
     } catch (err) {
@@ -152,7 +156,7 @@ export default function AdminDeliveriesPage() {
         { delivererId: selectedDelivererId, orderItemIds: selectedItemIds }
       );
       setMessage("Assigned.");
-      setLastHandoffs(res.data.handoffs);
+      setLastHandoffs(withCode(res.data.handoffs));
       setSelectedItemIds([]);
       await load();
     } catch (err) {

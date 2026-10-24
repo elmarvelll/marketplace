@@ -8,13 +8,14 @@
 // order creation time (never re-sorted client-side, and never by delivery
 // date). The delivery-date tabs are filters over that same list, grouped by
 // TIMEFRAME (spec §8), each group still newest-first. The only
-// deliverer-related UI is read-only: who is collecting each order, and the
-// pickup code to give them, driven entirely by delivery assignment.
+// deliverer-related UI is read-only: who is collecting each order, driven
+// entirely by delivery assignment. There is no pickup code: the vendor just
+// hands the order over, and the delivery is confirmed by the student's code.
 
 "use client";
 
 import { use, useEffect, useMemo, useState } from "react";
-import { AlertCircle, Loader2, Package, ShieldCheck } from "lucide-react";
+import { AlertCircle, Loader2, Package } from "lucide-react";
 import api from "@/lib/axios";
 
 interface VendorOrderItem {
@@ -43,13 +44,6 @@ interface VendorOrder {
   items: VendorOrderItem[];
 }
 
-interface PendingPickup {
-  id: string;
-  pickupOtp: string | null;
-  pickupOtpExpiry: string | null;
-  delivererName: string;
-}
-
 const nairaFormatter = new Intl.NumberFormat("en-NG", { maximumFractionDigits: 0 });
 const dateFormatter = new Intl.DateTimeFormat("en-NG", { weekday: "short", month: "long", day: "numeric" });
 
@@ -62,8 +56,9 @@ function orderStatusLabel(order: VendorOrder): { text: string; tone: "info" | "p
   if (order.status === "CANCELLED" || order.items.every((i) => i.refunded || i.rejectedAt)) return { text: "Refunded", tone: "problem" };
   if (order.deliveryOutcome === "DELIVERED" || order.deliveryOutcome === "DELIVERED_PENDING_DISPUTE_WINDOW") return { text: "Delivered", tone: "done" };
   if (order.deliveryOutcome === "FAILED") return { text: "Delivery failed", tone: "problem" };
+  // HANDED_TO_DELIVERER only on orders from before pickups stopped being confirmed online.
   if (order.fulfillmentStatus === "HANDED_TO_DELIVERER") return { text: "Collected by deliverer", tone: "progress" };
-  if (order.delivererName) return { text: `Confirmed · ${order.delivererName} will collect`, tone: "info" };
+  if (order.delivererName) return { text: `Processing · ${order.delivererName} will collect`, tone: "progress" };
   return { text: "Confirmed · awaiting scheduled delivery", tone: "info" };
 }
 
@@ -77,16 +72,14 @@ const TONE_CLASS = {
 export default function VendorOrdersPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [orders, setOrders] = useState<VendorOrder[]>([]);
-  const [pendingPickups, setPendingPickups] = useState<PendingPickup[]>([]);
   const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
   const [activeDate, setActiveDate] = useState<string | null>(null);
 
   const load = async () => {
     setLoadState("loading");
     try {
-      const res = await api.get<{ orders: VendorOrder[]; pendingPickups: PendingPickup[] }>(`/marketplace/vendor/${id}/orders`);
+      const res = await api.get<{ orders: VendorOrder[] }>(`/marketplace/vendor/${id}/orders`);
       setOrders(res.data.orders);
-      setPendingPickups(res.data.pendingPickups);
       setLoadState("loaded");
     } catch {
       setLoadState("error");
@@ -176,22 +169,6 @@ export default function VendorOrdersPage({ params }: { params: Promise<{ id: str
         nothing to accept or mark here. If you can&apos;t fulfil an order, contact the Marketplace admin.
       </p>
 
-      {pendingPickups.length > 0 && (
-        <div className="mb-6 space-y-2">
-          {pendingPickups.map((pickup) => (
-            <div key={pickup.id} className="flex items-center gap-3 bg-purple-50 border border-purple-100 rounded-2xl p-4">
-              <ShieldCheck size={20} className="text-purple-600 shrink-0" />
-              <div>
-                <p className="text-sm font-semibold text-purple-900">{pickup.delivererName} is assigned to collect from you</p>
-                <p className="text-xs text-purple-700">
-                  Give them this code when they arrive: <span className="font-bold tracking-wider">{pickup.pickupOtp}</span>
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
       {loadState === "loading" && (
         <div className="flex justify-center py-16">
           <Loader2 size={24} className="animate-spin text-gray-500" />
@@ -247,13 +224,13 @@ export default function VendorOrdersPage({ params }: { params: Promise<{ id: str
           {activeGroup && (
             <div className="space-y-8">
               {activeGroup.slots.map((slot) => {
-                const allCollected = slot.orders.every((o) => o.fulfillmentStatus === "HANDED_TO_DELIVERER" || o.status === "CANCELLED");
+                const allDelivered = slot.orders.every((o) => o.deliveryOutcome === "DELIVERED" || o.deliveryOutcome === "DELIVERED_PENDING_DISPUTE_WINDOW" || o.status === "CANCELLED");
                 return (
                   <div key={slot.label}>
                     <div className="flex items-center gap-2 mb-3">
                       <h2 className="font-semibold text-gray-900">{slot.label}</h2>
-                      {allCollected && (
-                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700">All collected</span>
+                      {allDelivered && (
+                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700">All delivered</span>
                       )}
                       <span className="text-xs text-gray-500">
                         {slot.orders.length} order{slot.orders.length === 1 ? "" : "s"}

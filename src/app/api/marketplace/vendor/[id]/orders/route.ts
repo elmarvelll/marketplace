@@ -1,6 +1,6 @@
 // .../vendor/[id]/orders/route.ts
 //
-// GET -> this vendor's own orders + any pending pickup codes. Thin route
+// GET -> this vendor's own orders (no pickup codes — Vendor deliveries have none). Thin route
 // — see ./route.controller.ts.
 
 import { NextRequest } from "next/server";

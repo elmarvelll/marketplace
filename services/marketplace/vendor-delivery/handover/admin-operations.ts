@@ -4,7 +4,10 @@
 // deliveries, and the audited interventions it offers. Every action here
 // requires a reason where it changes someone's delivery, writes an
 // AdminActionLog row, and goes through the same services as the normal flow:
-// completing uses complete-delivered-item.ts, assigning uses assign-delivery.ts,
+// completing needs the student's code (the admin fallback is
+// submit-delivery-code.ts#adminSubmitDeliveryCode — same check, audited) or,
+// for a legacy late submission, a code that was already verified correct;
+// assigning uses assign-delivery.ts,
 // refunds stay on admin/vendor-delivery/refund-vendor-item.ts. Payment state
 // is never changed here: only CONFIRMED (paid) bookings can be completed or
 // reassigned.
@@ -16,15 +19,16 @@ import { badRequest, conflict, notFound } from "@/lib/service-error";
 import { MAX_DELIVERY_CODE_ATTEMPTS } from "@/lib/delivery-code";
 import { logAdminAction } from "@/services/marketplace/admin/shared/log-admin-action";
 import { assignDelivery } from "@/services/marketplace/delivery/assign-delivery";
-import { completeDeliveredItem } from "@/services/marketplace/delivery/shared/complete-delivered-item";
+import { completeDeliveredItem, VENDOR_OPEN_DELIVERY_STATUSES } from "@/services/marketplace/delivery/shared/complete-delivered-item";
 import { recordOrderEvent } from "@/services/marketplace/order/record-order-event";
 import { createNotification } from "@/services/marketplace/notifications/notification.service";
 import { parseAndValidateDeliveryDate, MAX_SCHEDULE_CONFIG_DAYS } from "@/services/marketplace/vendor-delivery/validate-delivery-date";
 import { summarizeOccurrence, type SlotBriefingSummary } from "@/services/marketplace/vendor-delivery/slot-briefing";
 import { schoolTimeToInstant } from "@/services/marketplace/vendor-delivery/is-slot-bookable";
 import { buildVendorManifests, type ManifestCard } from "./manifest";
-import { deliveryConfirmationDeadline } from "./delivery-deadline";
+import { deliveryConfirmationDeadline, isPastDeadline } from "./delivery-deadline";
 import { markCodeVerifiedIfDone } from "./submit-delivery-code";
+import { resolveSettledOverdue } from "./overdue-confirmations";
 
 const PAST_DAYS_VIEWABLE = 30;
 
@@ -44,6 +48,25 @@ export interface OpsBooking {
   plannedDeliverer: string | null;
   code: { masked: string; failedAttempts: number; locked: boolean; verified: boolean } | null;
   deadlineAt: string;
+  // Deliverers holding items of this booking (open = still processing) — whose items an admin-entered code confirms.
+  holders: { id: string; name: string; open: boolean }[];
+  // Overdue-confirmation history: flagged when the deadline passed unconfirmed; resolved (kept) once delivered/cancelled.
+  overdue: { deadlineAt: string; flaggedAt: string; resolvedAt: string | null; resolution: string | null }[];
+  // Audit of every code submission that completed it or was entered by an admin.
+  confirmations: {
+    id: string;
+    method: "DELIVERER" | "ADMIN_FALLBACK";
+    outcome: string;
+    deliverer: string;
+    enteredBy: string | null;
+    reason: string | null;
+    receivedAt: string;
+    clientRecordedAt: string | null;
+    late: boolean;
+    // The phone says it was entered before the deadline but the server got it after (offline?) — unverified.
+    clientClaimsOnTime: boolean;
+  }[];
+  // Legacy: late codes from before late codes completed the delivery, waiting for a decision.
   lateSubmissions: { id: string; deliverer: string; receivedAt: string; clientRecordedAt: string | null; codeMatched: boolean }[];
   needsAttention: string[];
 }
@@ -88,7 +111,7 @@ export async function getVendorOperationsDay(dateStr: string | undefined): Promi
                 variantName: true,
                 product: { select: { name: true } },
                 side: { select: { name: true } },
-                deliveryItem: { select: { delivery: { select: { deliveryman: { select: { firstName: true, lastName: true } } } } } },
+                deliveryItem: { select: { status: true, delivery: { select: { deliveryman: { select: { id: true, firstName: true, lastName: true } } } } } },
               },
             },
           },
@@ -96,18 +119,24 @@ export async function getVendorOperationsDay(dateStr: string | undefined): Promi
       },
     }),
     buildVendorManifests({ dates: [date] }),
-    // Admin briefings only — the same table also holds deliverer, missed-shift and lock rows.
+    // Admin briefings only — the same table also holds deliverer and lock rows (and legacy missed-shift rows).
     prisma.slotBriefingNotice.findMany({ where: { operation: "VENDOR", date, recipientKey: { startsWith: "admin:" } }, select: { slotId: true, sentAt: true } }),
   ]);
 
   const bookingIds = bookings.map((b) => b.id);
-  const [codes, late, plans] = await Promise.all([
+  const [codes, late, plans, audited, overdueRows] = await Promise.all([
     prisma.deliveryHandoverCode.findMany({ where: { bookingId: { in: bookingIds } } }),
     prisma.deliveryCodeSubmission.findMany({ where: { bookingId: { in: bookingIds }, outcome: "LATE_REVIEW", reviewedAt: null }, orderBy: { receivedAt: "asc" } }),
     prisma.scheduledDelivery.findMany({ where: { bookingId: { in: bookingIds } }, select: { bookingId: true, plannedDelivererId: true } }),
+    prisma.deliveryCodeSubmission.findMany({ where: { bookingId: { in: bookingIds }, OR: [{ outcome: "VERIFIED" }, { method: "ADMIN_FALLBACK" }] }, orderBy: { receivedAt: "asc" } }),
+    prisma.deliveryConfirmationOverdue.findMany({ where: { bookingId: { in: bookingIds } }, orderBy: { flaggedAt: "asc" } }),
   ]);
-  const delivererIds = Array.from(new Set([...late.map((l) => l.delivererId), ...plans.map((p) => p.plannedDelivererId).filter((id): id is string => Boolean(id))]));
+  const delivererIds = Array.from(
+    new Set([...late.map((l) => l.delivererId), ...audited.map((a) => a.delivererId), ...plans.map((p) => p.plannedDelivererId).filter((id): id is string => Boolean(id))])
+  );
   const people = new Map((await prisma.deliverer.findMany({ where: { id: { in: delivererIds } }, select: { id: true, firstName: true, lastName: true } })).map((d) => [d.id, `${d.firstName} ${d.lastName}`]));
+  const adminIds = Array.from(new Set(audited.map((a) => a.enteredBy).filter((id): id is string => Boolean(id))));
+  const adminNames = new Map((await prisma.user.findMany({ where: { id: { in: adminIds } }, select: { id: true, firstName: true, lastName: true } })).map((u) => [u.id, `${u.firstName} ${u.lastName}`]));
   const now = new Date();
 
   const result: OpsSlot[] = [];
@@ -127,21 +156,27 @@ export async function getVendorOperationsDay(dateStr: string | undefined): Promi
         const code = codes.find((c) => c.bookingId === b.id);
         const items = b.orders.flatMap((o) => o.items);
         const live = items.filter((i) => !i.cancelledAt && !i.rejectedAt);
-        const deadline = deliveryConfirmationDeadline(b.bookedFor, b.slot.windowEnd, live.map((i) => i.retryDeliveryAt));
+        const deadline = deliveryConfirmationDeadline(b.bookedFor, live.map((i) => i.retryDeliveryAt));
         const delivererNames = Array.from(
           new Set(items.map((i) => i.deliveryItem?.delivery.deliveryman).filter(Boolean).map((m) => `${m!.firstName} ${m!.lastName}`))
         );
+        const holders = new Map<string, { id: string; name: string; open: boolean }>();
+        for (const i of live) {
+          const man = i.deliveryItem?.delivery.deliveryman;
+          if (!man) continue;
+          const open = VENDOR_OPEN_DELIVERY_STATUSES.includes(i.deliveryItem!.status);
+          const prev = holders.get(man.id);
+          holders.set(man.id, { id: man.id, name: `${man.firstName} ${man.lastName}`, open: open || Boolean(prev?.open) });
+        }
         const lateRows = late.filter((l) => l.bookingId === b.id);
+        const overdueHistory = overdueRows.filter((o) => o.bookingId === b.id);
         const needsAttention: string[] = [];
         if (b.status === "CONFIRMED") {
           if (live.some((i) => !i.deliveryStatus)) needsAttention.push("Not assigned to a deliverer");
-          if (slotCards.some((c) => c.shift.state === "MISSED" && !c.shift.unlocked && c.deliveries.some((d) => d.bookingId === b.id))) {
-            needsAttention.push("Deliverer missed the shift — reassign or unlock it");
-          }
           if ((code?.failedAttempts ?? 0) >= MAX_DELIVERY_CODE_ATTEMPTS && !code?.verifiedAt) needsAttention.push("Code locked after wrong attempts");
           if (!code) needsAttention.push("No delivery code issued");
           if (lateRows.length > 0) needsAttention.push("Late confirmation to review");
-          if (now > deadline && live.some((i) => i.deliveryStatus !== "DELIVERED")) needsAttention.push("Past the 24-hour confirmation deadline");
+          if (isPastDeadline(deadline, now) && live.some((i) => i.deliveryStatus !== "DELIVERED")) needsAttention.push("Not confirmed by the end of the delivery day");
           if (live.some((i) => i.deliveryStatus === "FAILED" || i.deliveryStatus === "DELIVERY_ATTEMPTED")) needsAttention.push("Failed delivery attempt");
         }
         const plan = plans.find((p) => p.bookingId === b.id);
@@ -172,6 +207,27 @@ export async function getVendorOperationsDay(dateStr: string | undefined): Promi
           plannedDeliverer: plan?.plannedDelivererId ? (people.get(plan.plannedDelivererId) ?? null) : null,
           code: code ? { masked: code.maskedCode, failedAttempts: code.failedAttempts, locked: code.failedAttempts >= MAX_DELIVERY_CODE_ATTEMPTS, verified: Boolean(code.verifiedAt) } : null,
           deadlineAt: deadline.toISOString(),
+          holders: Array.from(holders.values()),
+          overdue: overdueHistory.map((o) => ({
+            deadlineAt: o.deadlineAt.toISOString(),
+            flaggedAt: o.flaggedAt.toISOString(),
+            resolvedAt: o.resolvedAt?.toISOString() ?? null,
+            resolution: o.resolution,
+          })),
+          confirmations: audited
+            .filter((a) => a.bookingId === b.id)
+            .map((a) => ({
+              id: a.id,
+              method: a.method,
+              outcome: a.outcome,
+              deliverer: people.get(a.delivererId) ?? "Deliverer",
+              enteredBy: a.enteredBy ? (adminNames.get(a.enteredBy) ?? "Admin") : null,
+              reason: a.fallbackReason,
+              receivedAt: a.receivedAt.toISOString(),
+              clientRecordedAt: a.clientRecordedAt?.toISOString() ?? null,
+              late: a.late,
+              clientClaimsOnTime: a.late && a.clientRecordedAt !== null && a.clientRecordedAt < a.deadlineAt,
+            })),
           lateSubmissions: lateRows.map((l) => ({
             id: l.id,
             deliverer: people.get(l.delivererId) ?? "Deliverer",
@@ -205,7 +261,8 @@ function requireReason(reason: string | undefined): string {
   return clean.slice(0, 500);
 }
 
-// Decide a delivery confirmation that reached the server after its deadline.
+// Decide a LEGACY late confirmation (LATE_REVIEW) — from before a correct
+// late code completed the delivery by itself (it now does, recorded as late).
 // COMPLETED is allowed only when the student's code was correct: the late
 // arrival is excused, the code check is not. Anything else is DECLINED (the
 // order stays undelivered for normal resolution: retry, refund, dispute).
@@ -232,7 +289,7 @@ export async function reviewLateSubmission(adminUserId: string, submissionRowId:
       if (input.decision !== "COMPLETED") return 0;
       const items = await tx.deliveryItem.findMany({
         where: {
-          status: { in: ["PICKED_UP", "OUT_FOR_DELIVERY"] },
+          status: { in: VENDOR_OPEN_DELIVERY_STATUSES },
           delivery: { deliverymanId: row.delivererId },
           orderItem: { cancelledAt: null, order: { vendorDeliveryBookingId: row.bookingId, status: { not: "CANCELLED" } } },
         },
@@ -243,11 +300,13 @@ export async function reviewLateSubmission(adminUserId: string, submissionRowId:
         const done = await completeDeliveredItem(
           tx,
           { deliveryItemId: item.id, orderItemId: item.orderItemId, orderId: item.orderItem.orderId },
-          { delivererId: row.delivererId, now, codeVerified: true, by: { type: "admin", id: adminUserId, note: `Late confirmation approved: ${note}` } }
+          { delivererId: row.delivererId, now, codeVerified: true, by: { type: "admin", id: adminUserId, note: `Late confirmation approved: ${note}` } },
+          VENDOR_OPEN_DELIVERY_STATUSES
         );
         if (done) count += 1;
       }
       await markCodeVerifiedIfDone(tx, row.bookingId, now);
+      await resolveSettledOverdue(tx, row.bookingId, now);
       return count;
     },
     { timeout: 15000 }
@@ -260,9 +319,11 @@ export async function reviewLateSubmission(adminUserId: string, submissionRowId:
   return { delivered };
 }
 
-// Move a booking's not-yet-collected items to another deliverer (or assign
-// ones nobody holds yet). Items already picked up stay with whoever has them
-// — physical custody can't be reassigned from a dashboard.
+// Move a booking's undelivered items to another deliverer (or assign ones
+// nobody holds yet). Vendor items stay ASSIGNED while processing — there is no
+// pickup confirmation — so the admin decides from what they know whether the
+// first deliverer still has them. Items confirmed picked up under the old
+// pickup step (legacy PICKED_UP / OUT_FOR_DELIVERY) stay with whoever has them.
 export async function reassignBooking(adminUserId: string, bookingId: string, input: { delivererId?: string; reason?: string }) {
   const reason = requireReason(input.reason);
   if (!input.delivererId) throw badRequest("delivererId is required.");
@@ -281,10 +342,10 @@ export async function reassignBooking(adminUserId: string, bookingId: string, in
     },
     select: { id: true, orderId: true, deliveryStatus: true },
   });
-  if (items.length === 0) throw conflict("Nothing left to reassign — every item is collected or already with that deliverer.");
+  if (items.length === 0) throw conflict("Nothing left to reassign — every item is delivered or already with that deliverer.");
 
-  // Return the uncollected items to the pool, then assign them through the
-  // normal path (new pickup code, events, plan sync, notifications).
+  // Return the items to the pool, then assign them through the normal path
+  // (new run for the new deliverer, events, plan sync, notifications).
   const moving = items.filter((i) => i.deliveryStatus === "ASSIGNED");
   if (moving.length > 0) {
     await prisma.$transaction(async (tx) => {

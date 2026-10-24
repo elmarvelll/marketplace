@@ -10,12 +10,14 @@
 //      admin and reported as unassigned);
 //   2. brief every admin (the vendor managers) once: bookings, vendor orders,
 //      excluded unpaid checkouts, deliverers, capacity, unassigned items;
-//   3. brief each assigned deliverer once: counts, pickup points and the
-//      meeting point where an admin checks them in — their delivery card
-//      (manifest.ts) holds the rest.
+//   3. brief each assigned deliverer once: counts, the vendors to buy/collect
+//      from and the meeting point — their delivery card (manifest.ts) holds
+//      the rest. Nothing has to be confirmed before delivering: the student's
+//      code alone completes each delivery.
 //
-// And after each slot ends: any shift nobody checked in is MISSED
-// (handover/shift.ts) — admins and the deliverer are told once.
+// And on every run: deliveries whose student-code deadline (end of the
+// delivery day, school time) has passed unconfirmed are flagged and the admins
+// told once (handover/overdue-confirmations.ts).
 //
 // Exactly-once per (slot occurrence, recipient): a SlotBriefingNotice row is
 // claimed BEFORE sending (unique index), and deleted again only if the send
@@ -39,6 +41,7 @@ import { appUrl, delivererSlotBriefingEmail, escapeHtml, getAdminEmail, sendEmai
 import { MIN_ORDER_CUTOFF_MINS, schoolTimeToInstant } from "./is-slot-bookable";
 import { todayInSchoolTimezone } from "./validate-delivery-date";
 import { buildVendorManifests } from "./handover/manifest";
+import { flagOverdueConfirmations } from "./handover/overdue-confirmations";
 
 // Recorded as the actor of automatic assignments (order events, plans).
 export const SLOT_BRIEFING_ACTOR = "system:slot-briefing";
@@ -65,7 +68,7 @@ export interface SlotBriefingSummary {
 
 export interface SlotBriefingRun {
   occurrences: (SlotBriefingSummary & { adminsNotified: number; deliverersNotified: number })[];
-  missedShiftNotices: number;
+  overdue: { flagged: number; adminsNotified: number; resolved: number };
 }
 
 // Slot occurrences (today and tomorrow, school time) whose briefing window is open now.
@@ -152,63 +155,6 @@ function adminMessage(s: SlotBriefingSummary): string {
   return parts.join(" · ") + ".";
 }
 
-// Slot occurrences that ended within the last day — checked for missed shifts.
-export async function recentlyEndedOccurrences(now: Date = new Date()) {
-  const slots = await prisma.vendorDeliverySlot.findMany({ where: { active: true }, select: { id: true, label: true, windowStart: true, windowEnd: true } });
-  const today = todayInSchoolTimezone(now);
-  const ended: { slot: (typeof slots)[number]; date: Date }[] = [];
-  for (const date of [addDays(today, -1), today]) {
-    for (const slot of slots) {
-      const end = schoolTimeToInstant(date, slot.windowEnd);
-      if (now >= end && now.getTime() < end.getTime() + 24 * 60 * 60_000) ended.push({ slot, date });
-    }
-  }
-  return ended;
-}
-
-// A shift nobody checked in by the slot's end is MISSED (shift.ts). Tell the
-// admins (its deliveries need reassigning or the shift unlocking) and the
-// deliverer — once each.
-async function notifyMissedShifts(now: Date): Promise<number> {
-  let notified = 0;
-  for (const { slot, date } of await recentlyEndedOccurrences(now)) {
-    const missed = (await buildVendorManifests({ dates: [date] })).filter((c) => c.slotId === slot.id && c.shift.state === "MISSED" && !c.shift.unlocked);
-    if (missed.length === 0) continue;
-    const people = await prisma.deliverer.findMany({ where: { id: { in: missed.map((c) => c.deliverer.id) } }, select: { id: true, userId: true } });
-    const admins = await prisma.user.findMany({ where: { isAdmin: true }, select: { id: true } });
-    for (const card of missed) {
-      const open = card.deliveries.filter((d) => d.status !== "DELIVERED" && d.status !== "CANCELLED").length;
-      const title = `${dayLabel.format(date)} ${slot.label}: ${card.deliverer.name} missed their shift`;
-      for (const admin of admins) {
-        const sent = await sendOnce(slot.id, date, `missed:${card.deliverer.id}:admin:${admin.id}`, async () => {
-          await createNotification({
-            recipientId: admin.id,
-            scope: "ADMIN",
-            type: "VENDOR_SHIFT_MISSED",
-            title,
-            message: `They weren't checked in before the slot ended. ${open} deliver${open === 1 ? "y" : "ies"} still open — reassign them or unlock the shift.`,
-            targetUrl: `/admin/delivery-operations?date=${isoDate(date)}`,
-          });
-        });
-        if (sent) notified += 1;
-      }
-      const person = people.find((p) => p.id === card.deliverer.id);
-      if (person) {
-        await sendOnce(slot.id, date, `missed:${card.deliverer.id}`, async () => {
-          await createNotification({
-            recipientId: person.userId,
-            type: "DELIVERER_SHIFT_MISSED",
-            title: `Missed shift: ${dayLabel.format(date)} ${slot.label}`,
-            message: "You weren't checked in at the meeting point before this slot ended, so the shift was recorded as missed. Contact the Marketplace admin.",
-            targetUrl: "/deliverer",
-          });
-        });
-      }
-    }
-  }
-  return notified;
-}
-
 // Assigns one occurrence's paid, unassigned deliveries to their planned
 // deliverers. Serialized per occurrence by a short-lived lock row (unique
 // index), because it runs both from the scheduled job and whenever a
@@ -255,7 +201,7 @@ export async function assignDueDeliveries(now: Date = new Date()): Promise<numbe
 }
 
 export async function runSlotBriefings(now: Date = new Date()): Promise<SlotBriefingRun> {
-  const run: SlotBriefingRun = { occurrences: [], missedShiftNotices: 0 };
+  const run: SlotBriefingRun = { occurrences: [], overdue: { flagged: 0, adminsNotified: 0, resolved: 0 } };
   for (const { slot, date } of await dueOccurrences(now)) {
     // 1. Auto-assign planned deliveries (idempotent: assigned items are no longer "ready").
     const newlyAssigned = await assignOccurrence(slot.id, date);
@@ -300,7 +246,7 @@ export async function runSlotBriefings(now: Date = new Date()): Promise<SlotBrie
           recipientId: person.userId,
           type: "DELIVERER_SLOT_BRIEFING",
           title: `${dayLabel.format(date)} ${slot.label}: your delivery card is ready`,
-          message: `${active.length} student deliver${active.length === 1 ? "y" : "ies"} from ${card.pickups.length} vendor${card.pickups.length === 1 ? "" : "s"}. Report to ${card.meetingPoint ?? "the meeting point"} by ${card.arriveBy} to be checked in.`,
+          message: `${active.length} student deliver${active.length === 1 ? "y" : "ies"} from ${card.pickups.length} vendor${card.pickups.length === 1 ? "" : "s"}. Be at ${card.meetingPoint ?? "the meeting point"} by ${card.arriveBy}. Confirm each delivery with the student's code by the end of the day.`,
           targetUrl: "/deliverer",
         });
         const res = await sendEmailWithResult({
@@ -322,6 +268,11 @@ export async function runSlotBriefings(now: Date = new Date()): Promise<SlotBrie
 
     run.occurrences.push({ ...summary, adminsNotified, deliverersNotified });
   }
-  run.missedShiftNotices = await notifyMissedShifts(now);
+  try {
+    run.overdue = await flagOverdueConfirmations(now);
+  } catch (err) {
+    // Briefings above are already sent; the next run retries the overdue check.
+    console.error("[slot-briefing] overdue-confirmation check failed:", err instanceof Error ? err.message : err);
+  }
   return run;
 }

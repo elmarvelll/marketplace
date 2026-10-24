@@ -5,11 +5,17 @@
 // assignment (Delivery/DeliveryItem), not the roster plan, so it always
 // matches who is actually carrying what.
 //
-// Per slot occurrence and deliverer: the vendor pickups (name, location,
-// contact the vendor chose to publish, order refs, item counts) and the
-// student deliveries (booking ref, student's first name, delivery location,
-// items, status, deadline, and the MASKED code). Never included: the full
-// code, payment or bank details, student email or other personal data.
+// Per slot occurrence and deliverer: the vendors to buy/collect from (name,
+// location, contact the vendor chose to publish, order refs, item counts —
+// information only, nothing to confirm) and the student deliveries (booking
+// ref, student's first name, delivery location, items, status, deadline, and
+// the MASKED code). Never included: the full code, payment or bank details,
+// student email or other personal data.
+//
+// A delivery is PROCESSING_ORDER from assignment until the student's code is
+// verified (DELIVERED). FAILED (a failed attempt waiting for its retry) and
+// CANCELLED are the existing exception states. Legacy PICKED_UP /
+// OUT_FOR_DELIVERY items read as processing.
 //
 // Used by the deliverer's own dashboard (only their items) and by the admin
 // operations page (any deliverer — admins see the same mask, never the code).
@@ -17,10 +23,10 @@
 import { prisma } from "@/lib/prisma";
 import { MAX_DELIVERY_CODE_ATTEMPTS } from "@/lib/delivery-code";
 import { formatArrivalTime } from "@/services/marketplace/vendor-delivery/deliverer-arrival";
-import { deliveryConfirmationDeadline, slotEndsAt } from "./delivery-deadline";
-import { getCheckInLocation, shiftState, type ShiftState } from "./shift";
+import { deliveryConfirmationDeadline, isPastDeadline, slotEndsAt } from "./delivery-deadline";
+import { attendanceOf, getCheckInLocation, type Attendance } from "./shift";
 
-export type ManifestDeliveryStatus = "AWAITING_PICKUP" | "COLLECTED" | "ON_THE_WAY" | "DELIVERED" | "FAILED" | "CANCELLED";
+export type ManifestDeliveryStatus = "PROCESSING_ORDER" | "DELIVERED" | "FAILED" | "CANCELLED";
 
 export interface ManifestDelivery {
   bookingId: string;
@@ -33,9 +39,14 @@ export interface ManifestDelivery {
   codeLocked: boolean;
   attemptsLeft: number;
   deadlineAt: string;
+  // Past the deadline with no valid confirmation yet — the code can still be entered.
+  overdue: boolean;
   failedAttempts: number;
   retryDeliveryAt: string | null;
+  // Legacy: a late code from before late codes completed the delivery, still waiting for an admin.
   pendingLateReview: boolean;
+  // How it was confirmed, once delivered (null for a delivery confirmed before this was recorded).
+  confirmation: { method: "DELIVERER" | "ADMIN_FALLBACK"; at: string; late: boolean } | null;
 }
 
 export interface ManifestCard {
@@ -47,20 +58,20 @@ export interface ManifestCard {
   windowEnd: string;
   arriveBy: string;
   deliverer: { id: string; name: string; phone: string | null };
-  // The shift (shift.ts): SCHEDULED -> IN_PROGRESS (admin check-in at the
-  // meeting point) -> DELIVERED, or MISSED. unlocked = actions are allowed.
-  shift: { state: ShiftState; unlocked: boolean; checkedInAt: string | null; late: boolean; endsAt: string };
+  // Attendance at the meeting point (shift.ts) — a record only, never a gate.
+  attendance: { state: Attendance; checkedInAt: string | null };
+  slotEndsAt: string;
   meetingPoint: string | null;
-  pickups: { businessId: string; name: string; location: string | null; contact: string | null; orderRefs: string[]; itemCount: number; collected: boolean }[];
+  pickups: { businessId: string; name: string; location: string | null; contact: string | null; orderRefs: string[]; itemCount: number }[];
   deliveries: ManifestDelivery[];
 }
+
+const PROCESSING = ["ASSIGNED", "PICKED_UP", "OUT_FOR_DELIVERY"];
 
 function statusOf(statuses: string[], cancelled: boolean): ManifestDeliveryStatus {
   if (cancelled || statuses.length === 0) return "CANCELLED";
   if (statuses.every((s) => s === "DELIVERED")) return "DELIVERED";
-  if (statuses.some((s) => s === "ASSIGNED")) return "AWAITING_PICKUP";
-  if (statuses.some((s) => s === "OUT_FOR_DELIVERY")) return "ON_THE_WAY";
-  if (statuses.some((s) => s === "PICKED_UP")) return "COLLECTED";
+  if (statuses.some((s) => PROCESSING.includes(s))) return "PROCESSING_ORDER";
   return "FAILED";
 }
 
@@ -100,9 +111,14 @@ export async function buildVendorManifests(filter: { delivererId?: string; dates
   if (rows.length === 0) return [];
 
   const bookingIds = Array.from(new Set(rows.map((r) => r.orderItem.order.vendorDeliveryBooking!.id)));
-  const [codes, lateReviews, handovers] = await Promise.all([
+  const [codes, lateReviews, verified, handovers] = await Promise.all([
     prisma.deliveryHandoverCode.findMany({ where: { bookingId: { in: bookingIds } }, select: { bookingId: true, maskedCode: true, failedAttempts: true } }),
     prisma.deliveryCodeSubmission.findMany({ where: { bookingId: { in: bookingIds }, outcome: "LATE_REVIEW", reviewedAt: null }, select: { bookingId: true } }),
+    prisma.deliveryCodeSubmission.findMany({
+      where: { bookingId: { in: bookingIds }, outcome: "VERIFIED" },
+      orderBy: { receivedAt: "asc" },
+      select: { bookingId: true, delivererId: true, method: true, receivedAt: true, late: true },
+    }),
     prisma.deliveryShiftCheckIn.findMany({ where: { operation: "VENDOR", delivererId: filter.delivererId, ...(filter.dates ? { date: { in: filter.dates } } : filter.fromDate ? { date: { gte: filter.fromDate } } : {}) } }),
   ]);
   const meetingPoint = await getCheckInLocation();
@@ -131,8 +147,8 @@ export async function buildVendorManifests(filter: { delivererId?: string; dates
           windowEnd: booking.slot.windowEnd,
           arriveBy: formatArrivalTime(booking.slot.windowStart),
           deliverer: { id: man.id, name: `${man.firstName} ${man.lastName}`, phone: man.phone },
-          // state filled in once every delivery of the card is known (below)
-          shift: { state: "SCHEDULED", unlocked: false, checkedInAt: checkIn?.checkedInAt.toISOString() ?? null, late: checkIn?.late ?? false, endsAt: slotEndsAt(booking.bookedFor, booking.slot.windowEnd).toISOString() },
+          attendance: { state: attendanceOf(checkIn), checkedInAt: checkIn?.checkedInAt.toISOString() ?? null },
+          slotEndsAt: slotEndsAt(booking.bookedFor, booking.slot.windowEnd).toISOString(),
           meetingPoint,
           pickups: [],
           deliveries: [],
@@ -146,12 +162,11 @@ export async function buildVendorManifests(filter: { delivererId?: string; dates
     acc.bookings.get(booking.id)!.rows.push(row);
 
     const biz = order.business;
-    if (!acc.pickups.has(biz.id)) acc.pickups.set(biz.id, { businessId: biz.id, name: biz.name, location: biz.location, contact: biz.contactInfo, orderRefs: [], itemCount: 0, collected: true, refs: new Set() });
+    if (!acc.pickups.has(biz.id)) acc.pickups.set(biz.id, { businessId: biz.id, name: biz.name, location: biz.location, contact: biz.contactInfo, orderRefs: [], itemCount: 0, refs: new Set() });
     const pickup = acc.pickups.get(biz.id)!;
     if (!row.orderItem.cancelledAt) {
       pickup.refs.add(order.id.slice(0, 8));
       pickup.itemCount += row.orderItem.quantity;
-      if (row.status === "ASSIGNED") pickup.collected = false;
     }
   }
 
@@ -172,26 +187,28 @@ export async function buildVendorManifests(filter: { delivererId?: string; dates
       const retryAts = live.map((r) => r.orderItem.retryDeliveryAt);
       const latestRetry = retryAts.filter((d): d is Date => Boolean(d)).sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
       const code = codeOf.get(bookingId);
+      const status = statusOf(live.map((r) => r.status), live.length === 0);
+      const deadlineAt = deliveryConfirmationDeadline(booking.bookedFor, retryAts);
+      const confirmed = verified.filter((v) => v.bookingId === bookingId && v.delivererId === acc.card.deliverer.id).at(-1);
       acc.card.deliveries.push({
         bookingId,
         reference: bookingId.slice(0, 8).toUpperCase(),
         studentFirstName: first.user.firstName,
         deliveryLocation: first.deliveryLocation,
         vendors: Array.from(vendors.values()),
-        status: statusOf(live.map((r) => r.status), live.length === 0),
+        status,
         maskedCode: code?.maskedCode ?? null,
         codeLocked: (code?.failedAttempts ?? 0) >= MAX_DELIVERY_CODE_ATTEMPTS,
         attemptsLeft: Math.max(0, MAX_DELIVERY_CODE_ATTEMPTS - (code?.failedAttempts ?? 0)),
-        deadlineAt: deliveryConfirmationDeadline(booking.bookedFor, booking.slot.windowEnd, retryAts).toISOString(),
+        deadlineAt: deadlineAt.toISOString(),
+        overdue: status === "PROCESSING_ORDER" && isPastDeadline(deadlineAt, now),
         failedAttempts: Math.max(0, ...live.map((r) => r.orderItem.failedDeliveryAttempts)),
         retryDeliveryAt: latestRetry?.toISOString() ?? null,
         pendingLateReview: lateSet.has(bookingId),
+        confirmation: status === "DELIVERED" && confirmed ? { method: confirmed.method, at: confirmed.receivedAt.toISOString(), late: confirmed.late } : null,
       });
     }
     acc.card.deliveries.sort((a, b) => a.reference.localeCompare(b.reference));
-    const done = acc.card.deliveries.every((d) => d.status === "DELIVERED" || d.status === "CANCELLED" || d.status === "FAILED");
-    const checkIn = acc.card.shift.checkedInAt ? { checkedInAt: new Date(acc.card.shift.checkedInAt), late: acc.card.shift.late } : null;
-    acc.card.shift = { ...acc.card.shift, ...shiftState(checkIn, new Date(acc.card.shift.endsAt), done, now) };
     result.push(acc.card);
   }
   return result.sort((a, b) => a.date.localeCompare(b.date) || a.windowStart.localeCompare(b.windowStart) || a.deliverer.name.localeCompare(b.deliverer.name));

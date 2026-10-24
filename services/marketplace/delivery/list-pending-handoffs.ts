@@ -1,13 +1,14 @@
 // services/marketplace/delivery/list-pending-handoffs.ts
 //
-// The signed-in deliverer's pending pickup handoffs. Called by
+// The signed-in deliverer's Business pickup handoffs (Vendor Market runs have
+// no pickup step — see assign-delivery.ts). Called by
 // src/app/api/marketplace/deliverer/handoffs/route.controller.ts.
 
 import { prisma } from "@/lib/prisma";
 
 export async function listPendingHandoffs(delivererId: string) {
   const handoffs = await prisma.delivery_x_businesses.findMany({
-    where: { deliverymanId: delivererId },
+    where: { deliverymanId: delivererId, business: { type: "BUSINESS" } },
     orderBy: { createdAt: "desc" },
     select: {
       id: true,

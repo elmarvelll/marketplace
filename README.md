@@ -168,7 +168,9 @@ reconcile, email retry) is idempotent per row and stays on.
 **Exception: `/api/cron/vendor-slot-briefing`** exists only in this app, so it runs whatever
 `MARKETPLACE_SCHEDULED_JOBS` says (still `CRON_SECRET`-authenticated). It is the pre-slot Vendor Market operation:
 from two hours before each delivery slot it assigns planned deliverers and briefs admins and deliverers
-(`services/marketplace/vendor-delivery/slot-briefing.ts`). Call it **every 5–10 minutes** — Vercel's free plan only
+(`services/marketplace/vendor-delivery/slot-briefing.ts`), and on every run it flags deliveries whose student-code
+deadline (end of the delivery day, Africa/Lagos) passed unconfirmed and alerts the admins once
+(`services/marketplace/vendor-delivery/handover/overdue-confirmations.ts`). Call it **every 5–10 minutes** — Vercel's free plan only
 runs daily jobs, so use an external scheduler (e.g. cron-job.org): `GET https://<your-domain>/api/cron/vendor-slot-briefing`
 with header `Authorization: Bearer <CRON_SECRET>`. Calling it more often, late, or from two schedulers is safe: each
 notice is recorded and sent at most once. Nothing at checkout depends on it — the two-hour order cutoff is enforced

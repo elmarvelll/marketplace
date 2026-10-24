@@ -1,10 +1,13 @@
 // Student-orchestrated Vendor Market delivery, end to end against the local test replica: the two-hour cutoff at
 // checkout, the student's handover code (issued only after verified payment, masked for everyone else), vendors
-// as information-only, per-booking delivery confirmation (wrong codes, lock, replay, late -> admin review), and the
-// pre-slot briefing (auto-assignment, exactly-once notifications). Paystack/Resend faked.
+// as information-only, the simplified delivery workflow (assigned -> PROCESSING_ORDER -> the student's code ->
+// DELIVERED, with no vendor pickup code and no admin check-in), wrong codes, lock, replay, the end-of-day deadline
+// (overdue flag, late completion), the audited admin fallback, legacy records, and the pre-slot briefing
+// (auto-assignment, exactly-once notifications). Paystack/Resend faked.
 import "../helpers/env";
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { ServiceError } from "@/lib/service-error";
 import { installFakeProviders, paystack, resend } from "../helpers/fake-providers";
@@ -16,18 +19,22 @@ import { reconcileCheckoutPayment } from "@/services/marketplace/checkout/reconc
 import { assignDelivery } from "@/services/marketplace/delivery/assign-delivery";
 import { confirmPickup } from "@/services/marketplace/delivery/confirm-pickup";
 import { markOutForDelivery } from "@/services/marketplace/delivery/mark-out-for-delivery";
+import { listPendingHandoffs } from "@/services/marketplace/delivery/list-pending-handoffs";
 import { markOrderReady } from "@/services/marketplace/order/mark-order-ready";
 import { listVendorOrders } from "@/services/marketplace/vendor/order/list-vendor-orders";
 import { listBuyerOrders } from "@/services/marketplace/order/list-buyer-orders";
 import { setPlannedDeliverer } from "@/services/marketplace/delivery-roster/delivery-plans";
 import { buildVendorManifests } from "@/services/marketplace/vendor-delivery/handover/manifest";
-import { submitDeliveryCode } from "@/services/marketplace/vendor-delivery/handover/submit-delivery-code";
-import { startBookingDelivery } from "@/services/marketplace/vendor-delivery/handover/booking-delivery";
+import { adminSubmitDeliveryCode, submitDeliveryCode } from "@/services/marketplace/vendor-delivery/handover/submit-delivery-code";
+import { reportBookingFailedAttempt } from "@/services/marketplace/vendor-delivery/handover/booking-delivery";
 import { reissueHandoverCode } from "@/services/marketplace/vendor-delivery/handover/handover-code";
-import { reviewLateSubmission, reassignBooking } from "@/services/marketplace/vendor-delivery/handover/admin-operations";
+import { getVendorOperationsDay, reviewLateSubmission, reassignBooking } from "@/services/marketplace/vendor-delivery/handover/admin-operations";
+import { flagOverdueConfirmations, listOpenOverdueConfirmations } from "@/services/marketplace/vendor-delivery/handover/overdue-confirmations";
+import { deliveryConfirmationDeadline } from "@/services/marketplace/vendor-delivery/handover/delivery-deadline";
 import { runSlotBriefings } from "@/services/marketplace/vendor-delivery/slot-briefing";
+import { runDisputeWindowSweep } from "@/services/marketplace/vendor-delivery/dispute-window-sweep";
 import { schoolTimeToInstant } from "@/services/marketplace/vendor-delivery/is-slot-bookable";
-import { checkInShift, setCheckInLocation, shiftState } from "@/services/marketplace/vendor-delivery/handover/shift";
+import { checkInShift, setCheckInLocation } from "@/services/marketplace/vendor-delivery/handover/shift";
 
 before(() => installFakeProviders());
 beforeEach(async () => {
@@ -59,7 +66,7 @@ async function bookAndPay(s: S, userId = s.buyer.id) {
 const codeEmails = (to: string) => resend.sent.filter((m) => m.to === to && /delivery code/i.test(m.subject + m.html) && /letter-spacing/.test(m.html));
 const codeFrom = (html: string) => /letter-spacing:4px;">(\d{6})</.exec(html)![1];
 
-// Paid booking, assigned to a fresh deliverer (not yet checked in).
+// Paid booking, assigned to a fresh deliverer: from here it is processing — no pickup code, no check-in.
 async function assigned() {
   const s = await vendorCheckoutScenario();
   const booking = await bookAndPay(s);
@@ -68,16 +75,16 @@ async function assigned() {
   const itemIds = booking.orders.flatMap((o) => o.items.map((i) => i.id));
   await assignDelivery(d.id, itemIds, await admin());
   const handoff = await prisma.delivery_x_businesses.findFirstOrThrow({ where: { deliverymanId: d.id, businessId: s.vendor.id } });
-  const shift = { date: s.date, slotId: s.slot.id, delivererId: d.id };
-  return { s, booking, code, d, itemIds, handoff, shift };
+  return { s, booking, code, d, itemIds, handoff };
 }
-// ...checked in at the meeting point and picked up at the vendor.
-async function collected() {
-  const a = await assigned();
-  await checkInShift(await admin(), a.shift);
-  await confirmPickup(a.d.id, a.handoff.id, a.handoff.pickupOtp!);
-  return a;
+// The booking moved to `daysAgo` days back, so its end-of-day deadline has passed.
+async function backdate(bookingId: string, daysAgo: number) {
+  const bookedFor = new Date(`${lagosDatePlus(-daysAgo)}T00:00:00.000Z`);
+  await prisma.vendorDeliveryBooking.update({ where: { id: bookingId }, data: { bookedFor } });
+  return { bookedFor, deadline: deliveryConfirmationDeadline(bookedFor) };
 }
+const cardFor = async (delivererId: string, bookingId: string) =>
+  (await buildVendorManifests({ delivererId })).flatMap((c) => c.deliveries).find((x) => x.bookingId === bookingId)!;
 const wrongOf = (code: string) => (code === "999999" ? "000000" : String(Number(code) + 1).padStart(6, "0"));
 const sid = () => `sub-${crypto.randomUUID()}`;
 
@@ -127,9 +134,26 @@ describe("vendors are information-only", () => {
   });
 });
 
-describe("delivery confirmation with the student's code", () => {
+describe("delivery workflow: processing until the student's code, then delivered", () => {
+  it("an assigned order is processing with no vendor pickup code, pickup step or admin check-in", async () => {
+    const { s, booking, d, itemIds, handoff } = await assigned();
+    assert.deepEqual([handoff.pickupOtp, handoff.pickupOtpExpiry], [null, null], "no vendor pickup code is issued");
+    assert.ok(handoff.delivererConfirmedPickupAt, "the deliverer's run starts at assignment");
+    assert.equal(await prisma.orderEvent.count({ where: { orderItemId: itemIds[0], type: "DELIVERER_PICKUP_OTP_ISSUED" } }), 0);
+    assert.ok(!resend.sent.some((m) => m.to === d.email && /pickup/i.test(m.subject)), "no 'collect with this code' email");
+
+    const delivery = await cardFor(d.id, booking.id);
+    assert.equal(delivery.status, "PROCESSING_ORDER");
+    assert.equal(await prisma.deliveryShiftCheckIn.count({ where: { delivererId: d.id } }), 0, "nobody checked them in");
+    await assert.rejects(confirmPickup(d.id, handoff.id, "000000"), status(409), "there is no pickup confirmation to make");
+    assert.equal((await listPendingHandoffs(d.id)).length, 0, "nothing waits on a pickup code");
+    signInAs(s.owner);
+    const vendorView = await listVendorOrders(s.vendor.id);
+    assert.ok(!("pendingPickups" in vendorView), "the vendor is shown no pickup code");
+  });
+
   it("wrong codes count, other deliverers can't, the full code completes it once, replays change nothing", async () => {
-    const { s, booking, code, d, itemIds } = await collected();
+    const { s, booking, code, d, itemIds } = await assigned();
     const cards = await buildVendorManifests({ delivererId: d.id });
     const delivery = cards.flatMap((c) => c.deliveries).find((x) => x.bookingId === booking.id)!;
     assert.match(delivery.maskedCode!, /_/);
@@ -138,31 +162,49 @@ describe("delivery confirmation with the student's code", () => {
 
     const deliveryItem = await prisma.deliveryItem.findFirstOrThrow({ where: { orderItemId: itemIds[0] } });
     await assert.rejects(markOutForDelivery(d.id, deliveryItem.id), status(409), "no per-item code for vendor items");
-    assert.deepEqual(await startBookingDelivery(d.id, booking.id), { started: 1 });
 
     const wrong = await submitDeliveryCode(d.id, booking.id, { code: wrongOf(code), submissionId: sid() });
     assert.deepEqual(wrong, { outcome: "REJECTED", reason: "mismatch", attemptsLeft: 4 });
+    assert.equal((await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] } })).deliveryStatus, "ASSIGNED", "a wrong code delivers nothing");
     const other = await makeDeliverer();
-    await assert.rejects(submitDeliveryCode(other.id, booking.id, { code, submissionId: sid() }), status(404));
+    await assert.rejects(submitDeliveryCode(other.id, booking.id, { code, submissionId: sid() }), status(404), "another deliverer can't complete it");
     await assert.rejects(submitDeliveryCode(d.id, booking.id, { code: delivery.maskedCode, submissionId: sid() }), status(400), "the mask is not a code");
 
     const submissionId = sid();
     const ok = await submitDeliveryCode(d.id, booking.id, { code, submissionId, clientRecordedAt: new Date(0).toISOString() });
-    assert.deepEqual(ok, { outcome: "VERIFIED", deliveredItems: 1, alreadyDelivered: false });
+    assert.deepEqual(ok, { outcome: "VERIFIED", deliveredItems: 1, alreadyDelivered: false, late: false });
     const item = await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] } });
     assert.deepEqual([item.deliveryStatus, item.escrowStatus], ["DELIVERED", "PAYOUT_PENDING"]);
+    assert.ok(item.deliveryConfirmedAt, "confirmation time recorded");
     assert.equal((await prisma.order.findUniqueOrThrow({ where: { id: item.orderId } })).deliveryOutcome, "DELIVERED_PENDING_DISPUTE_WINDOW");
     assert.ok((await prisma.deliveryHandoverCode.findUniqueOrThrow({ where: { bookingId: booking.id } })).verifiedAt);
+    assert.equal((await cardFor(d.id, booking.id)).status, "DELIVERED");
+    assert.deepEqual((await cardFor(d.id, booking.id)).confirmation?.method, "DELIVERER");
 
-    assert.deepEqual(await submitDeliveryCode(d.id, booking.id, { code, submissionId }), { outcome: "VERIFIED", deliveredItems: 0, alreadyDelivered: true });
+    assert.deepEqual(await submitDeliveryCode(d.id, booking.id, { code, submissionId }), { outcome: "VERIFIED", deliveredItems: 0, alreadyDelivered: true, late: false });
+    assert.deepEqual((await submitDeliveryCode(d.id, booking.id, { code, submissionId: sid() })).outcome, "VERIFIED", "a second valid submission changes nothing");
     await assert.rejects(submitDeliveryCode(other.id, booking.id, { code, submissionId }), status(409), "a submission id can't be reused by someone else");
     assert.equal(await prisma.orderEvent.count({ where: { orderItemId: itemIds[0], type: "DELIVERED" } }), 1, "side effects once");
+    assert.equal(await prisma.notification.count({ where: { userId: s.buyer.id, type: "ORDER_DELIVERED" } }), 1, "the student is told once");
     const sub = await prisma.deliveryCodeSubmission.findUniqueOrThrow({ where: { submissionId } });
     assert.ok(sub.receivedAt.getTime() > Date.now() - 60_000 && sub.clientRecordedAt!.getTime() === 0, "server time decides; client time kept for audit");
+    assert.deepEqual([sub.method, sub.enteredBy, sub.late], ["DELIVERER", null, false]);
+  });
+
+  it("another student's code never completes this booking", async () => {
+    const a = await assigned();
+    const s2 = await vendorCheckoutScenario();
+    const other = await bookAndPay(s2);
+    const otherCode = codeFrom(codeEmails(s2.buyer.email).at(-1)!.html);
+    await assignDelivery(a.d.id, other.orders.flatMap((o) => o.items.map((i) => i.id)), await admin());
+    if (otherCode === a.code) return; // 1 in a million: the two random codes coincide
+    assert.equal((await submitDeliveryCode(a.d.id, a.booking.id, { code: otherCode, submissionId: sid() })).outcome, "REJECTED");
+    assert.equal((await prisma.orderItem.findUniqueOrThrow({ where: { id: a.itemIds[0] } })).deliveryStatus, "ASSIGNED");
+    assert.equal((await submitDeliveryCode(a.d.id, other.id, { code: otherCode, submissionId: sid() })).outcome, "VERIFIED", "it completes its own booking only");
   });
 
   it("locks after five wrong codes until an admin reissues it; the new code then works", async () => {
-    const { s, booking, code, d } = await collected();
+    const { s, booking, code, d } = await assigned();
     for (let i = 4; i >= 0; i--) {
       assert.deepEqual(await submitDeliveryCode(d.id, booking.id, { code: wrongOf(code), submissionId: sid() }), { outcome: "REJECTED", reason: "mismatch", attemptsLeft: i });
     }
@@ -178,27 +220,17 @@ describe("delivery confirmation with the student's code", () => {
     assert.equal((await submitDeliveryCode(d.id, booking.id, { code: fresh, submissionId: sid() })).outcome, "VERIFIED");
   });
 
-  it("a correct code first received after the 24-hour deadline completes nothing until an admin approves it", async () => {
-    const { booking, code, d, itemIds } = await collected();
-    // Move the whole shift three days back: the deliverer was checked in on the day, the code only arrives now.
-    const past = new Date(`${lagosDatePlus(-3)}T00:00:00.000Z`);
-    await prisma.vendorDeliveryBooking.update({ where: { id: booking.id }, data: { bookedFor: past } });
-    await checkInShift(await admin(), { date: lagosDatePlus(-3), slotId: booking.slotId, delivererId: d.id, note: "checked in on the day (test setup)" });
-
-    const late = await submitDeliveryCode(d.id, booking.id, { code, submissionId: sid(), clientRecordedAt: new Date().toISOString() });
-    assert.equal(late.outcome, "LATE_REVIEW");
-    assert.equal((await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] } })).deliveryStatus, "PICKED_UP", "not delivered");
-
-    const row = await prisma.deliveryCodeSubmission.findFirstOrThrow({ where: { bookingId: booking.id, outcome: "LATE_REVIEW" } });
-    await assert.rejects(reviewLateSubmission(await admin(), row.id, { decision: "COMPLETED" }), status(400), "a reason is required");
-    assert.deepEqual(await reviewLateSubmission(await admin(), row.id, { decision: "COMPLETED", note: "Student confirmed by phone" }), { delivered: 1 });
-    assert.equal((await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] } })).deliveryStatus, "DELIVERED");
-    await assert.rejects(reviewLateSubmission(await admin(), row.id, { decision: "COMPLETED", note: "again" }), status(409));
-    const event = await prisma.orderEvent.findFirstOrThrow({ where: { orderItemId: itemIds[0], type: "DELIVERED" } });
-    assert.deepEqual([event.actorType, event.actorId], ["admin", await admin()]);
+  it("a failed attempt can be reported while processing, without any start or pickup step", async () => {
+    const { booking, code, d, itemIds } = await assigned();
+    assert.deepEqual(await reportBookingFailedAttempt(d.id, booking.id, "Student not at the hall"), { reported: 1 });
+    const item = await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] } });
+    assert.equal(item.deliveryStatus, "FAILED");
+    assert.ok(item.retryDeliveryAt);
+    assert.equal((await cardFor(d.id, booking.id)).status, "FAILED");
+    await assert.rejects(submitDeliveryCode(d.id, booking.id, { code, submissionId: sid() }), status(409), "nothing to confirm until it's rescheduled");
   });
 
-  it("an admin can move uncollected items to another deliverer, with a reason; collected ones stay put", async () => {
+  it("an admin can move undelivered items to another deliverer, with a reason", async () => {
     const s = await vendorCheckoutScenario();
     const booking = await bookAndPay(s);
     const [a, b] = [await makeDeliverer(), await makeDeliverer()];
@@ -207,8 +239,204 @@ describe("delivery confirmation with the student's code", () => {
     assert.equal((await reassignBooking(await admin(), booking.id, { delivererId: b.id, reason: "Del A is ill" })).reassignedItems, 1);
     const di = await prisma.deliveryItem.findFirstOrThrow({ where: { orderItemId: booking.orders[0].items[0].id }, include: { delivery: true } });
     assert.equal(di.delivery.deliverymanId, b.id);
-    const oldHandoff = await prisma.delivery_x_businesses.findFirstOrThrow({ where: { deliverymanId: a.id, businessId: s.vendor.id } });
-    assert.equal(oldHandoff.pickupOtp, null, "the old deliverer's pickup code no longer works");
+    const code = codeFrom(codeEmails(s.buyer.email).at(-1)!.html);
+    await assert.rejects(submitDeliveryCode(a.id, booking.id, { code, submissionId: sid() }), status(404), "the old deliverer no longer holds it");
+    assert.equal((await submitDeliveryCode(b.id, booking.id, { code, submissionId: sid() })).outcome, "VERIFIED");
+  });
+});
+
+describe("end-of-day deadline: overdue flag and late confirmation", () => {
+  it("is not flagged before the deadline, flagged at it once, never auto-delivered/cancelled/refunded, and repeated runs don't re-alert", async () => {
+    const { booking, d, itemIds } = await assigned();
+    const deadline = deliveryConfirmationDeadline(booking.bookedFor);
+    const adminUser = await admin();
+    const alerts = () => prisma.notification.count({ where: { userId: adminUser, type: "VENDOR_DELIVERY_CONFIRMATION_OVERDUE", title: { contains: booking.id.slice(0, 8).toUpperCase() } } });
+
+    await flagOverdueConfirmations(new Date(deadline.getTime() - 1));
+    assert.equal(await prisma.deliveryConfirmationOverdue.count({ where: { bookingId: booking.id } }), 0, "not before the deadline");
+    assert.equal((await cardFor(d.id, booking.id)).overdue, false);
+
+    await flagOverdueConfirmations(deadline);
+    await flagOverdueConfirmations(new Date(deadline.getTime() + 60_000));
+    const rows = await prisma.deliveryConfirmationOverdue.findMany({ where: { bookingId: booking.id } });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].deadlineAt.toISOString(), deadline.toISOString(), "the missed deadline is recorded");
+    assert.ok(rows[0].adminsNotifiedAt);
+    assert.equal(await alerts(), 1, "each admin alerted once");
+    const alert = await prisma.notification.findFirstOrThrow({ where: { userId: adminUser, type: "VENDOR_DELIVERY_CONFIRMATION_OVERDUE", title: { contains: booking.id.slice(0, 8).toUpperCase() } } });
+    assert.match(alert.message, new RegExp(`deliverer: Del ${(await prisma.deliverer.findUniqueOrThrow({ where: { id: d.id } })).lastName}`));
+
+    const item = await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] }, include: { order: true } });
+    assert.deepEqual([item.deliveryStatus, item.cancelledAt, item.escrowStatus === "PAYOUT_PENDING", item.order.status === "CANCELLED"], ["ASSIGNED", null, false, false], "overdue changes nothing");
+    assert.ok((await listOpenOverdueConfirmations()).some((o) => o.bookingId === booking.id), "listed for admins");
+  });
+
+  it("a delivered booking is never flagged", async () => {
+    const { booking, code, d } = await assigned();
+    await submitDeliveryCode(d.id, booking.id, { code, submissionId: sid() });
+    await flagOverdueConfirmations(new Date(deliveryConfirmationDeadline(booking.bookedFor).getTime() + 60_000));
+    assert.equal(await prisma.deliveryConfirmationOverdue.count({ where: { bookingId: booking.id } }), 0);
+  });
+
+  it("a correct code after the deadline still completes it, recorded as late, and the overdue history is kept (resolved)", async () => {
+    const { booking, code, d, itemIds } = await assigned();
+    await backdate(booking.id, 3);
+    await flagOverdueConfirmations();
+    assert.equal((await cardFor(d.id, booking.id)).overdue, true);
+
+    const submissionId = sid();
+    // The phone claims it was entered before the deadline (offline) — unverifiable, so the server's time decides.
+    const late = await submitDeliveryCode(d.id, booking.id, { code, submissionId, clientRecordedAt: new Date(`${lagosDatePlus(-3)}T12:00:00.000Z`).toISOString() });
+    assert.deepEqual(late, { outcome: "VERIFIED", deliveredItems: 1, alreadyDelivered: false, late: true });
+    assert.equal((await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] } })).deliveryStatus, "DELIVERED");
+    assert.equal((await prisma.deliveryCodeSubmission.findUniqueOrThrow({ where: { submissionId } })).late, true);
+
+    const rows = await prisma.deliveryConfirmationOverdue.findMany({ where: { bookingId: booking.id } });
+    assert.equal(rows.length, 1, "overdue history kept");
+    assert.ok(rows[0].resolvedAt);
+    assert.equal(rows[0].resolution, "DELIVERED");
+    await flagOverdueConfirmations();
+    assert.equal(await prisma.deliveryConfirmationOverdue.count({ where: { bookingId: booking.id, resolvedAt: null } }), 0, "not reopened");
+
+    const day = await getVendorOperationsDay(lagosDatePlus(-3));
+    const ops = day.slots.flatMap((sl) => sl.bookings).find((b) => b.bookingId === booking.id)!;
+    assert.deepEqual(ops.confirmations.map((c) => [c.method, c.late, c.clientClaimsOnTime]), [["DELIVERER", true, true]], "admins see it was late, and the phone's unverified claim");
+    assert.ok(await prisma.notification.findFirst({ where: { userId: await admin(), type: "VENDOR_DELIVERY_LATE_CODE", message: { contains: "unverified" } } }));
+  });
+
+  it("a cancelled overdue booking is resolved as cancelled", async () => {
+    const { booking } = await assigned();
+    await backdate(booking.id, 2);
+    await flagOverdueConfirmations();
+    await prisma.orderItem.updateMany({ where: { order: { vendorDeliveryBookingId: booking.id } }, data: { cancelledAt: new Date() } });
+    await flagOverdueConfirmations();
+    const row = await prisma.deliveryConfirmationOverdue.findFirstOrThrow({ where: { bookingId: booking.id } });
+    assert.equal(row.resolution, "CANCELLED");
+  });
+
+  it("the briefing job runs the overdue check", async () => {
+    const { booking } = await assigned();
+    await backdate(booking.id, 1);
+    const run = await runSlotBriefings();
+    assert.ok(run.overdue.flagged >= 1);
+    assert.equal(await prisma.deliveryConfirmationOverdue.count({ where: { bookingId: booking.id } }), 1);
+  });
+});
+
+describe("admin fallback: an admin enters the student's code for the deliverer", () => {
+  it("same code check, a reason required, recorded as the admin's entry, side effects once", async () => {
+    const { s, booking, code, d, itemIds } = await assigned();
+    const adminUser = await admin();
+    await assert.rejects(adminSubmitDeliveryCode(adminUser, booking.id, { code, submissionId: sid() }), status(400), "a reason is required");
+
+    const wrong = await adminSubmitDeliveryCode(adminUser, booking.id, { code: wrongOf(code), reason: "Deliverer's phone died", submissionId: sid() });
+    assert.equal(wrong.outcome, "REJECTED", "an admin can't complete it with a wrong code");
+    assert.equal((await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] } })).deliveryStatus, "ASSIGNED");
+    assert.equal((await prisma.deliveryHandoverCode.findUniqueOrThrow({ where: { bookingId: booking.id } })).failedAttempts, 1, "counts towards the lock");
+
+    const submissionId = sid();
+    const ok = await adminSubmitDeliveryCode(adminUser, booking.id, { code, reason: "Deliverer's phone died; read the code by call", submissionId });
+    assert.deepEqual(ok, { outcome: "VERIFIED", deliveredItems: 1, alreadyDelivered: false, late: false, delivererId: d.id });
+    const sub = await prisma.deliveryCodeSubmission.findUniqueOrThrow({ where: { submissionId } });
+    assert.deepEqual([sub.method, sub.enteredBy, sub.fallbackReason, sub.delivererId], ["ADMIN_FALLBACK", adminUser, "Deliverer's phone died; read the code by call", d.id]);
+    const event = await prisma.orderEvent.findFirstOrThrow({ where: { orderItemId: itemIds[0], type: "DELIVERED" } });
+    assert.deepEqual([event.actorType, event.actorId], ["admin", adminUser]);
+    assert.equal(await prisma.adminActionLog.count({ where: { targetId: booking.id, action: "VENDOR_DELIVERY_CODE_ENTERED_BY_ADMIN" } }), 1);
+    assert.equal((await cardFor(d.id, booking.id)).confirmation?.method, "ADMIN_FALLBACK");
+
+    await adminSubmitDeliveryCode(adminUser, booking.id, { code, reason: "again", submissionId });
+    await adminSubmitDeliveryCode(adminUser, booking.id, { code, reason: "again", submissionId: sid() });
+    assert.equal(await prisma.orderEvent.count({ where: { orderItemId: itemIds[0], type: "DELIVERED" } }), 1, "never completed twice");
+    assert.equal(await prisma.notification.count({ where: { userId: s.buyer.id, type: "ORDER_DELIVERED" } }), 1);
+  });
+
+  it("only admins can use the endpoint", async () => {
+    const { booking, code } = await assigned();
+    const { POST } = await import("@/app/api/marketplace/admin/delivery-operations/bookings/[bookingId]/confirm-code/route");
+    const call = () =>
+      POST(new NextRequest("https://marketplace.test/x", { method: "POST", body: JSON.stringify({ code, reason: "r", submissionId: sid() }), headers: { "content-type": "application/json" } }), {
+        params: Promise.resolve({ bookingId: booking.id }),
+      });
+    signInAs(null);
+    assert.equal((await call()).status, 401);
+    signInAs(await makeUser());
+    assert.equal((await call()).status, 403);
+    assert.equal(await prisma.deliveryCodeSubmission.count({ where: { bookingId: booking.id } }), 0, "nothing recorded");
+  });
+
+  it("when several deliverers hold part of the booking, the admin must choose whose items it confirms", async () => {
+    // One student, two vendors: one booking, one code, one order per vendor — each collected by a different deliverer.
+    const s = await vendorCheckoutScenario();
+    const vendor2 = await makeBusiness((await makeUser()).id, { type: "SCHOOL_VENDOR" });
+    const product2 = await makeProduct(vendor2.id, { stock: 5 });
+    await prisma.vendorTimeframeCapacity.create({ data: { businessId: vendor2.id, slotId: s.slot.id, capacity: 3 } });
+    await addToCart(s.buyer.id, product2.id, 1);
+    const booking = await bookAndPay(s);
+    assert.equal(booking.orders.length, 2);
+    const code = codeFrom(codeEmails(s.buyer.email).at(-1)!.html);
+    const [a, b] = [await makeDeliverer(), await makeDeliverer()];
+    const [first, second] = booking.orders.map((o) => o.items.map((i) => i.id));
+    await assignDelivery(a.id, first, await admin());
+    await assignDelivery(b.id, second, await admin());
+
+    await assert.rejects(adminSubmitDeliveryCode(await admin(), booking.id, { code, reason: "r", submissionId: sid() }), status(400));
+    const out = await adminSubmitDeliveryCode(await admin(), booking.id, { code, reason: "Del B can't connect", delivererId: b.id, submissionId: sid() });
+    assert.deepEqual([out.outcome, out.delivererId], ["VERIFIED", b.id]);
+    assert.equal((await prisma.orderItem.findUniqueOrThrow({ where: { id: first[0] } })).deliveryStatus, "ASSIGNED", "Del A's items are untouched");
+    assert.equal((await submitDeliveryCode(a.id, booking.id, { code, submissionId: sid() })).outcome, "VERIFIED", "the same code still completes Del A's part");
+  });
+
+  it("entered after the deadline: completes, recorded late, overdue history kept", async () => {
+    const { booking, code } = await assigned();
+    await backdate(booking.id, 2);
+    await flagOverdueConfirmations();
+    const out = await adminSubmitDeliveryCode(await admin(), booking.id, { code, reason: "Deliverer called it in late", submissionId: sid() });
+    assert.deepEqual([out.outcome, out.outcome === "VERIFIED" && out.late], ["VERIFIED", true]);
+    const row = await prisma.deliveryConfirmationOverdue.findFirstOrThrow({ where: { bookingId: booking.id } });
+    assert.equal(row.resolution, "DELIVERED");
+  });
+});
+
+describe("legacy records from the old pickup / check-in flow", () => {
+  it("an order still waiting on a vendor pickup code is completed by the student's code alone, and its deliverer's pay is still released", async () => {
+    const { s, booking, code, d, itemIds, handoff } = await assigned();
+    // As assign-delivery.ts used to leave it: a pickup code, the run not started, the order not stamped.
+    await prisma.delivery_x_businesses.update({ where: { id: handoff.id }, data: { pickupOtp: "123456", pickupOtpExpiry: new Date(Date.now() + 3600_000), delivererConfirmedPickupAt: null, delivererPayoutAmount: null } });
+    await prisma.order.updateMany({ where: { vendorDeliveryBookingId: booking.id }, data: { delivererConfirmedPickupAt: null } });
+
+    await assert.rejects(confirmPickup(d.id, handoff.id, "123456"), status(409), "the old pickup step is gone");
+    assert.equal((await listPendingHandoffs(d.id)).length, 0, "not shown as a pending pickup");
+    signInAs(s.owner);
+    assert.ok(!("pendingPickups" in (await listVendorOrders(s.vendor.id))), "the vendor isn't shown its code");
+
+    assert.equal((await submitDeliveryCode(d.id, booking.id, { code, submissionId: sid() })).outcome, "VERIFIED");
+    const run = await prisma.delivery_x_businesses.findUniqueOrThrow({ where: { id: handoff.id } });
+    assert.ok(run.delivererConfirmedPickupAt && run.delivererPayoutAmount !== null && run.pickupOtp === null, "the run is started for payout, its code voided");
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: (await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] } })).orderId } });
+    assert.equal(order.delivererConfirmedPickupAt?.toISOString(), run.delivererConfirmedPickupAt!.toISOString(), "the order joins that run");
+
+    await prisma.order.update({ where: { id: order.id }, data: { deliveredPendingDisputeAt: new Date(Date.now() - 25 * 60 * 60 * 1000) } });
+    await runDisputeWindowSweep();
+    assert.equal((await prisma.delivery_x_businesses.findUniqueOrThrow({ where: { id: handoff.id } })).delivererPayoutStatus, "PAYOUT_PENDING", "pay released after the dispute window");
+  });
+
+  it("an item already marked picked up / on the way completes the same way", async () => {
+    const { booking, code, d, itemIds } = await assigned();
+    await prisma.deliveryItem.updateMany({ where: { orderItemId: itemIds[0] }, data: { status: "OUT_FOR_DELIVERY" } });
+    await prisma.orderItem.update({ where: { id: itemIds[0] }, data: { deliveryStatus: "OUT_FOR_DELIVERY" } });
+    assert.equal((await cardFor(d.id, booking.id)).status, "PROCESSING_ORDER");
+    assert.equal((await submitDeliveryCode(d.id, booking.id, { code, submissionId: sid() })).outcome, "VERIFIED");
+  });
+
+  it("a legacy late confirmation awaiting review can still be accepted (correct code only) or declined", async () => {
+    const { booking, d, itemIds } = await assigned();
+    const row = await prisma.deliveryCodeSubmission.create({
+      data: { submissionId: sid(), bookingId: booking.id, delivererId: d.id, outcome: "LATE_REVIEW", reason: "received_after_deadline", codeMatched: true, deadlineAt: new Date(Date.now() - 3600_000) },
+    });
+    await assert.rejects(reviewLateSubmission(await admin(), row.id, { decision: "COMPLETED" }), status(400), "a reason is required");
+    assert.deepEqual(await reviewLateSubmission(await admin(), row.id, { decision: "COMPLETED", note: "Student confirmed by phone" }), { delivered: 1 });
+    assert.equal((await prisma.orderItem.findUniqueOrThrow({ where: { id: itemIds[0] } })).deliveryStatus, "DELIVERED");
+    await assert.rejects(reviewLateSubmission(await admin(), row.id, { decision: "COMPLETED", note: "again" }), status(409));
   });
 });
 
@@ -278,57 +506,29 @@ describe("pre-slot briefing", () => {
   });
 });
 
-describe("deliverer shifts: meeting point, check-in, missed", () => {
-  it("pure rule: scheduled until checked in, then in progress / delivered; missed after the slot ends; a late unlock stays missed", () => {
-    const end = new Date("2026-10-20T17:00:00.000Z");
-    const before = new Date("2026-10-20T16:00:00.000Z");
-    const after = new Date("2026-10-20T17:01:00.000Z");
-    assert.deepEqual(shiftState(null, end, false, before), { state: "SCHEDULED", unlocked: false });
-    assert.deepEqual(shiftState(null, end, false, after), { state: "MISSED", unlocked: false });
-    assert.deepEqual(shiftState({ checkedInAt: before, late: false }, end, false, after), { state: "IN_PROGRESS", unlocked: true });
-    assert.deepEqual(shiftState({ checkedInAt: before, late: false }, end, true, after), { state: "DELIVERED", unlocked: true });
-    assert.deepEqual(shiftState({ checkedInAt: after, late: true }, end, true, after), { state: "MISSED", unlocked: true });
-  });
-
-  it("nothing can be collected or delivered until an admin checks the deliverer in at the meeting point", async () => {
+describe("meeting point and check-in: attendance only, never a gate", () => {
+  it("a deliverer never checked in can still deliver; a check-in is just recorded (late after the slot)", async () => {
     await setCheckInLocation(await admin(), "Marketplace office, SUB");
-    const { booking, code, d, handoff, shift } = await assigned();
+    const { booking, code, d, s } = await assigned();
     const card = (await buildVendorManifests({ delivererId: d.id })).find((c) => c.deliveries.some((x) => x.bookingId === booking.id))!;
-    assert.deepEqual([card.shift.state, card.shift.unlocked, card.meetingPoint], ["SCHEDULED", false, "Marketplace office, SUB"]);
+    assert.deepEqual([card.attendance.state, card.meetingPoint], ["NOT_RECORDED", "Marketplace office, SUB"]);
+    assert.equal((await submitDeliveryCode(d.id, booking.id, { code, submissionId: sid() })).outcome, "VERIFIED", "no admin needed");
 
-    await assert.rejects(confirmPickup(d.id, handoff.id, handoff.pickupOtp!), (e: unknown) => status(409)(e) && /Marketplace office, SUB/.test((e as Error).message));
-    assert.equal((await prisma.delivery_x_businesses.findUniqueOrThrow({ where: { id: handoff.id } })).pickupOtpAttempts, 0, "a refused pickup doesn't use up an attempt");
-    await assert.rejects(submitDeliveryCode(d.id, booking.id, { code, submissionId: sid() }), status(409));
-
+    const shift = { date: s.date, slotId: s.slot.id, delivererId: d.id };
     assert.deepEqual(await checkInShift(await admin(), shift), { alreadyCheckedIn: false, late: false });
     assert.deepEqual(await checkInShift(await admin(), shift), { alreadyCheckedIn: true, late: false }, "idempotent");
-    assert.equal((await buildVendorManifests({ delivererId: d.id })).find((c) => c.deliveries.some((x) => x.bookingId === booking.id))!.shift.state, "IN_PROGRESS");
-    await confirmPickup(d.id, handoff.id, handoff.pickupOtp!);
-    assert.equal((await submitDeliveryCode(d.id, booking.id, { code, submissionId: sid() })).outcome, "VERIFIED");
-    assert.equal((await buildVendorManifests({ delivererId: d.id })).find((c) => c.deliveries.some((x) => x.bookingId === booking.id))!.shift.state, "DELIVERED");
+    assert.equal((await buildVendorManifests({ delivererId: d.id })).find((c) => c.deliveries.some((x) => x.bookingId === booking.id))!.attendance.state, "CHECKED_IN");
     assert.equal(await prisma.adminActionLog.count({ where: { targetId: d.id, action: "DELIVERY_SHIFT_CHECKED_IN" } }), 1);
   });
 
-  it("a shift with no check-in by the slot's end is missed, flagged to admins once, and can only be unlocked with a reason", async () => {
-    const { booking, d, shift } = await assigned();
-    await prisma.vendorDeliveryBooking.update({ where: { id: booking.id }, data: { bookedFor: new Date(`${lagosDatePlus(0)}T00:00:00.000Z`) } });
-    await prisma.vendorDeliverySlot.update({ where: { id: shift.slotId }, data: { windowStart: "00:00", windowEnd: "00:01" } });
+  it("after the slot ends a check-in is recorded as late, without needing a reason", async () => {
+    const { booking, d, s } = await assigned();
     const today = lagosDatePlus(0);
-    const card = (await buildVendorManifests({ delivererId: d.id })).find((c) => c.deliveries.some((x) => x.bookingId === booking.id))!;
-    assert.deepEqual([card.shift.state, card.shift.unlocked], ["MISSED", false]);
-
-    const end = schoolTimeToInstant(new Date(`${today}T00:00:00.000Z`), "00:01");
-    const first = await runSlotBriefings(new Date(end.getTime() + 60_000));
-    assert.ok(first.missedShiftNotices >= 1);
-    await runSlotBriefings(new Date(end.getTime() + 120_000));
-    assert.equal(await prisma.notification.count({ where: { userId: d.userId, type: "DELIVERER_SHIFT_MISSED" } }), 1, "deliverer told once");
-    assert.equal(await prisma.notification.count({ where: { userId: await admin(), type: "VENDOR_SHIFT_MISSED", title: { contains: d.lastName } } }), 1, "each admin told once");
-
-    const late = { ...shift, date: today };
-    await assert.rejects(checkInShift(await admin(), late), status(400), "a missed shift needs a reason to unlock");
-    assert.deepEqual(await checkInShift(await admin(), { ...late, note: "Phone died, came late" }), { alreadyCheckedIn: false, late: true });
-    const after = (await buildVendorManifests({ delivererId: d.id })).find((c) => c.deliveries.some((x) => x.bookingId === booking.id))!;
-    assert.deepEqual([after.shift.state, after.shift.unlocked], ["MISSED", true], "unlocked, still counted as missed");
+    await prisma.vendorDeliveryBooking.update({ where: { id: booking.id }, data: { bookedFor: new Date(`${today}T00:00:00.000Z`) } });
+    await prisma.vendorDeliverySlot.update({ where: { id: s.slot.id }, data: { windowStart: "00:00", windowEnd: "00:01" } });
+    assert.deepEqual(await checkInShift(await admin(), { date: today, slotId: s.slot.id, delivererId: d.id }), { alreadyCheckedIn: false, late: true });
+    const run = await runSlotBriefings(new Date(schoolTimeToInstant(new Date(`${today}T00:00:00.000Z`), "00:01").getTime() + 60_000));
+    assert.ok(!("missedShiftNotices" in run), "no missed-shift notices any more");
+    assert.equal(await prisma.notification.count({ where: { userId: d.userId, type: "DELIVERER_SHIFT_MISSED" } }), 0);
   });
 });
-

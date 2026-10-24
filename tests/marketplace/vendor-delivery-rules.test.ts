@@ -1,11 +1,11 @@
 // Pure rules of the student-orchestrated Vendor delivery workflow: the strict two-hour order cutoff (school time,
-// across midnight), the 24-hour confirmation deadline, and the delivery-code crypto (generation, masking,
+// across midnight), the end-of-day confirmation deadline, and the delivery-code crypto (generation, masking,
 // booking-bound verification, encryption). No database.
 import "../helpers/env";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { isSlotBookable, minutesUntilSlotStart, schoolTimeToInstant, MIN_ORDER_CUTOFF_MINS } from "@/services/marketplace/vendor-delivery/is-slot-bookable";
-import { deliveryConfirmationDeadline } from "@/services/marketplace/vendor-delivery/handover/delivery-deadline";
+import { deliveryConfirmationDeadline, deliveryDueDay, isPastDeadline } from "@/services/marketplace/vendor-delivery/handover/delivery-deadline";
 import {
   decryptDeliveryCode,
   deliveryCodeMatches,
@@ -63,11 +63,33 @@ describe("two-hour order cutoff", () => {
   });
 });
 
-describe("24-hour delivery confirmation deadline", () => {
-  it("is 24 hours after the slot ends, or after a rescheduled retry", () => {
-    assert.equal(deliveryConfirmationDeadline(day("2026-10-20"), "18:00").toISOString(), "2026-10-21T17:00:00.000Z");
-    const retry = new Date("2026-10-21T18:00:00.000Z");
-    assert.equal(deliveryConfirmationDeadline(day("2026-10-20"), "18:00", [null, retry]).toISOString(), "2026-10-22T18:00:00.000Z");
+describe("end-of-day delivery confirmation deadline", () => {
+  it("is midnight at the end of the delivery day in school time (Lagos, UTC+1) — not 24 h, not UTC midnight", () => {
+    const deadline = deliveryConfirmationDeadline(day("2026-10-20"));
+    assert.equal(deadline.toISOString(), "2026-10-20T23:00:00.000Z", "00:00 on Oct 21 in Lagos");
+    assert.equal(deadline.toISOString(), lagos("2026-10-21T00:00").toISOString());
+  });
+
+  it("has an exclusive boundary: on time until just before it, late from the instant itself", () => {
+    const deadline = deliveryConfirmationDeadline(day("2026-10-20"));
+    assert.equal(isPastDeadline(deadline, lagos("2026-10-20T23:59")), false);
+    assert.equal(isPastDeadline(deadline, new Date(deadline.getTime() - 1)), false);
+    assert.equal(isPastDeadline(deadline, deadline), true);
+    assert.equal(isPastDeadline(deadline, lagos("2026-10-21T00:01")), true);
+    // 23:30 UTC on Oct 20 is already Oct 21 in Lagos: late, even though it is still "Oct 20" on a UTC server.
+    assert.equal(isPastDeadline(deadline, new Date("2026-10-20T23:30:00.000Z")), true);
+  });
+
+  it("follows a rescheduled retry to the school day it falls on, across UTC midnight", () => {
+    assert.equal(deliveryDueDay(day("2026-10-20"), [null]).toISOString(), day("2026-10-20").toISOString());
+    // 23:30 UTC Oct 21 = 00:30 Oct 22 in Lagos -> due Oct 22, deadline midnight starting Oct 23 (Lagos).
+    const retry = new Date("2026-10-21T23:30:00.000Z");
+    assert.equal(deliveryDueDay(day("2026-10-20"), [retry]).toISOString(), day("2026-10-22").toISOString());
+    assert.equal(deliveryConfirmationDeadline(day("2026-10-20"), [null, retry]).toISOString(), "2026-10-22T23:00:00.000Z");
+    // 22:30 UTC Oct 21 = 23:30 Oct 21 in Lagos -> due Oct 21.
+    assert.equal(deliveryConfirmationDeadline(day("2026-10-20"), [new Date("2026-10-21T22:30:00.000Z")]).toISOString(), "2026-10-21T23:00:00.000Z");
+    // A retry earlier than the booked day never moves the deadline back.
+    assert.equal(deliveryConfirmationDeadline(day("2026-10-20"), [new Date("2026-10-19T12:00:00.000Z")]).toISOString(), "2026-10-20T23:00:00.000Z");
   });
 });
 

@@ -491,7 +491,7 @@ describe("central (Marketplace) deliveries", () => {
     const items = await prisma.orderItem.findMany({ where: { orderId: res.orderIds[0] } });
     const out = await assignPlannedDeliveries(items.map((i) => i.id), await admin());
     assert.equal(out.assigned[0].delivererId, d.id);
-    assert.match(out.assigned[0].handoffs[0].pickupOtp, /^\d{6}$/);
+    assert.match(out.assigned[0].handoffs[0].pickupOtp ?? "", /^\d{6}$/, "a Business handoff still has its coordinator pickup code");
     assert.equal((await prisma.orderItem.findUniqueOrThrow({ where: { id: items[0].id } })).deliveryStatus, "ASSIGNED");
     assert.ok(await prisma.notification.findFirst({ where: { userId: s.buyer.id, type: "ORDER_ASSIGNED_TO_DELIVERER" } }));
   });

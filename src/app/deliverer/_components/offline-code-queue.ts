@@ -7,12 +7,14 @@
 //   - Each entry gets a random submissionId once, so re-sending it (after a
 //     flaky connection, a reload, two tabs) is idempotent on the server.
 //   - Kept in localStorage only until the server settles it (verified,
-//     rejected, sent for late review, or refused for good), then deleted.
-//     Entries older than MAX_AGE are discarded unsent: by then the server
-//     would only send them to admin review, and the code shouldn't linger.
-//   - clientRecordedAt is sent as audit information only; the 24-hour
+//     rejected, or refused for good), then deleted. While it waits the card
+//     shows "Awaiting synchronization" — never "Delivered".
+//   - Entries older than MAX_AGE are discarded unsent so a code doesn't
+//     linger on the phone; a week is long past any connection gap, and a
+//     correct code sent late still completes the delivery (recorded as late).
+//   - clientRecordedAt is sent as audit information only; the end-of-day
 //     deadline is judged on the server's receive time, so changing the
-//     phone's clock gains nothing.
+//     phone's clock gains nothing (an admin sees both times).
 //
 // Known limit: localStorage is readable by anything running on this origin
 // and by someone holding the unlocked phone, so a code sits there in
@@ -26,7 +28,7 @@ import { isAxiosError } from "axios";
 import api from "@/lib/axios";
 
 const STORAGE_KEY = "akd.deliverer.pendingCodes.v1";
-const MAX_AGE_MS = 48 * 60 * 60 * 1000;
+const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const RETRY_EVERY_MS = 30_000;
 
 export interface QueuedCode {
@@ -37,8 +39,9 @@ export interface QueuedCode {
 }
 
 export type CodeResult =
-  | { outcome: "VERIFIED"; deliveredItems: number; alreadyDelivered: boolean }
+  | { outcome: "VERIFIED"; deliveredItems: number; alreadyDelivered: boolean; late?: boolean }
   | { outcome: "REJECTED"; reason: "mismatch" | "locked"; attemptsLeft: number }
+  // Legacy: only a replay of a submission stored before late codes completed the delivery.
   | { outcome: "LATE_REVIEW"; deadlineAt: string }
   | { outcome: "ERROR"; message: string };
 

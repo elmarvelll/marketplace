@@ -7,6 +7,13 @@
 // actually received the batch. Called by
 // src/app/api/marketplace/deliverer/handoffs/[handoffId]/confirm-pickup/route.controller.ts.
 // See docs/marketplace/security/otp-security.md.
+//
+// Business handoffs only. A School Vendor (Vendor Market) delivery has no
+// pickup step: the deliverer collects at the vendor, often offline, and the
+// delivery is completed by the student's code alone
+// (vendor-delivery/handover/submit-delivery-code.ts). Vendor handoffs are
+// created already started (assign-delivery.ts); one left over from before
+// that change is refused here rather than asked for a code.
 
 import { prisma } from "@/lib/prisma";
 import { notFound, conflict, badRequest } from "@/lib/service-error";
@@ -15,8 +22,6 @@ import { recordOrderEvent } from "@/services/marketplace/order/record-order-even
 import { recomputeOrderDeliveryOutcome } from "@/services/marketplace/order/recompute-order-delivery-outcome";
 import { ownerDashboardPath } from "@/services/marketplace/business/owner-dashboard-path";
 import { createNotification } from "@/services/marketplace/notifications/notification.service";
-import { requireShiftCheckIn } from "@/services/marketplace/vendor-delivery/handover/shift";
-import { getMarketplaceSettings } from "@/services/marketplace/admin/shared/marketplace-settings";
 
 export async function confirmPickup(delivererId: string, handoffId: string, suppliedOtp: string) {
   const handoff = await prisma.delivery_x_businesses.findFirst({
@@ -25,19 +30,8 @@ export async function confirmPickup(delivererId: string, handoffId: string, supp
   });
   if (!handoff) throw notFound("Handoff not found.");
   if (handoff.delivererConfirmedPickupAt) throw conflict("This handoff has already been confirmed.");
-
-  // Vendor Market: no collecting before an admin has checked the deliverer in
-  // for the shift(s) these items belong to (vendor-delivery/handover/shift.ts).
-  // Checked before the code, so a refused attempt doesn't use one up.
   if (handoff.business.type === "SCHOOL_VENDOR") {
-    const pending = await prisma.deliveryItem.findMany({
-      where: { businessId: handoff.businessId, status: "ASSIGNED", delivery: { deliverymanId: delivererId } },
-      select: { orderItem: { select: { order: { select: { vendorDeliveryBooking: { select: { slotId: true, bookedFor: true } } } } } } },
-    });
-    const shifts = new Map(
-      pending.map((p) => p.orderItem.order.vendorDeliveryBooking).filter(Boolean).map((b) => [`${b!.slotId}|${b!.bookedFor.toISOString()}`, b!])
-    );
-    for (const b of shifts.values()) await requireShiftCheckIn(delivererId, b.slotId, b.bookedFor);
+    throw conflict("Vendor Market orders need no pickup confirmation — collect them and enter the student's code when you deliver.");
   }
 
   const result = verifyOtp({
@@ -67,19 +61,11 @@ export async function confirmPickup(delivererId: string, handoffId: string, supp
 
   if (!result.ok) throw badRequest(`OTP verification failed: ${result.reason}.`);
 
-  // Deliverer payout rate is snapshotted the moment the handoff is
-  // confirmed — never re-read live later, so an admin changing the rate
-  // afterward never alters an already-confirmed handoff's payout amount
-  // (spec §55). School-Vendor-only; a Business handoff never pays a
-  // deliverer (Business sellers are paid via the existing seller-payout
-  // system instead — see docs/marketplace/decisions/vendor-extends-business.md).
-  const delivererPayoutAmount = handoff.business.type === "SCHOOL_VENDOR" ? (await getMarketplaceSettings()).delivererPayoutAmount : undefined;
-
   const now = new Date();
   await prisma.$transaction(async (tx) => {
     await tx.delivery_x_businesses.update({
       where: { id: handoffId },
-      data: { deliveryStatus: "PICKED_UP", delivererConfirmedPickupAt: now, ...(delivererPayoutAmount !== undefined ? { delivererPayoutAmount } : {}) },
+      data: { deliveryStatus: "PICKED_UP", delivererConfirmedPickupAt: now },
     });
     await tx.deliveryItem.updateMany({ where: { id: { in: items.map((i) => i.id) } }, data: { status: "PICKED_UP" } });
     await tx.orderItem.updateMany({ where: { id: { in: items.map((i) => i.orderItemId) } }, data: { deliveryStatus: "PICKED_UP" } });

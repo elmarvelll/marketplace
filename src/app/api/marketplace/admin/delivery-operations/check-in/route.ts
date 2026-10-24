@@ -1,9 +1,9 @@
 // .../admin/delivery-operations/check-in/route.ts
 //
-// POST { date, slotId, delivererId, note? } -> the deliverer reported at the
-// meeting point: start their shift (IN_PROGRESS), which unlocks their pickups
-// and deliveries. After the slot has ended this unlocks a missed shift and
-// needs a note. Audited. See services/marketplace/vendor-delivery/handover/shift.ts.
+// POST { date, slotId, delivererId, note? } -> record that the deliverer
+// reported at the meeting point (attendance only — it unlocks nothing; the
+// deliverer never needs it to process or deliver). After the slot has ended
+// it is recorded as late. Audited. See services/marketplace/vendor-delivery/handover/shift.ts.
 
 import { NextRequest, NextResponse } from "next/server";
 import { runController, readJsonBody } from "@/lib/controller-helpers";
